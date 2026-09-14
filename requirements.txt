@@ -13,5 +13,8 @@ pillow>=10.0.0
 # 自动加载 .env 文件中的 BOCHA_API_KEY / LM_STUDIO_BASE_URL
 python-dotenv>=1.0.1
 
+# Web UI（Gradio）
+gradio>=4.0.0
+
 # 运行单元测试
 # pytest>=8.0.0
