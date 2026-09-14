@@ -22,6 +22,7 @@ except ImportError:
 
 from ai_agent.client import LMStudioClient
 from ai_agent.rag import RAGKnowledgeBase
+from ai_agent.persistence import ChatStore, DEFAULT_DB_PATH
 from ai_agent.tools import (
     run_code, get_weather, calculator, web_search,
     file_read, file_write, sql_query, run_terminal, human_confirm,
@@ -181,11 +182,14 @@ class AgentDemoApp:
         },
     ]
 
-    def __init__(self):
+    def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.client = LMStudioClient()
         self.rag: RAGKnowledgeBase | None = None
         self.tool_map: dict = {}
         self.history: list[dict] = []
+        # ---------- 对话持久化 ----------
+        self.store = ChatStore(db_path)
+        self.session_id: str | None = None
 
     # ---------- 初始化步骤 ----------
 
@@ -388,6 +392,9 @@ class AgentDemoApp:
 
         self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
 
+        # ---------- 会话管理 ----------
+        self._handle_session_select()
+
         while True:
             try:
                 user_input = input("\n你> ").strip()
@@ -397,11 +404,26 @@ class AgentDemoApp:
 
             if not user_input:
                 continue
+
+            # ---------- 持久化命令 ----------
+            cmd_result = self._try_session_command(user_input)
+            if cmd_result is not None:
+                if cmd_result == "quit":
+                    print("再见！")
+                    break
+                continue
+
             if user_input.lower() in self.EXIT_WORDS:
                 print("再见！")
                 break
 
             self.history.append({"role": "user", "content": user_input})
+            # 持久化用户消息
+            if self.session_id:
+                self.store.append(self.session_id, "user", user_input)
+                # 自动生成标题（首条用户消息）
+                if self.store.count_messages(self.session_id) <= 1:
+                    self.store.auto_title(self.session_id, user_input)
 
             try:
                 print("\n助手> ", end="", flush=True)
@@ -416,6 +438,9 @@ class AgentDemoApp:
                 log.info("交互完成 (%.1fs, history=%d msg)", dt, len(self.history))
 
                 self.history.append({"role": "assistant", "content": reply})
+                # 持久化助手回复
+                if self.session_id:
+                    self.store.append(self.session_id, "assistant", reply)
 
                 # ===== 长对话自动摘要压缩 =====
                 total_chars = sum(len(m["content"]) for m in self.history)
@@ -424,9 +449,182 @@ class AgentDemoApp:
                     self.history = self.client.summarize_messages(self.history, keep_recent=4)
                     now_chars = sum(len(m["content"]) for m in self.history)
                     print(f"[系统] 压缩完成，剩余 {now_chars} 字符（保留最近 4 条完整消息）")
+                    # 压缩后清除持久化，只保存最近完整消息 + 新摘要
+                    if self.session_id:
+                        self.store.clear_messages(self.session_id)
+                        # 重写当前 history（去掉 system）
+                        for m in self.history[1:]:
+                            self.store.append(self.session_id, m["role"], m.get("content", ""),
+                                              m.get("tool_calls"))
             except RuntimeError as e:
                 print(f"[ERROR] {e}")
                 self.history.pop()
+
+        # 关闭持久化连接
+        self.store.close()
+
+    # ---------- 持久化辅助 ----------
+
+    def _handle_session_select(self) -> None:
+        """启动时显示会话列表让用户选择，或创建新会话"""
+        sessions = self.store.list_sessions(limit=10)
+        if sessions:
+            print(f"\n📁 已保存 {len(sessions)} 个历史会话：")
+            for i, s in enumerate(sessions, 1):
+                mode_tag = f"[{s.mode}]" if s.mode != "chat" else ""
+                print(f"   {i}. {s.title} {mode_tag} ({self.store.count_messages(s.id)} 条消息)")
+            print(f"   n. 新建会话")
+
+            while True:
+                choice = input("\n选择会话编号直接恢复，或按 Enter / n 新建: ").strip().lower()
+                if choice == "" or choice == "n":
+                    break
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(sessions):
+                        sid = sessions[idx].id
+                        saved = self.store.load_messages(sid)
+                        print(f"\n✅ 已恢复会话「{sessions[idx].title}」"
+                              f"（{len(saved)} 条历史消息）")
+                        # 恢复时把 system prompt + 历史消息拼回去
+                        self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}] + saved
+                        self.session_id = sid
+                        return
+                except ValueError:
+                    pass
+                print("   输入无效，请重试")
+
+        # 创建新会话
+        sid = self.store.create_session(title="新会话", mode="chat")
+        self.session_id = sid
+        print(f"\n✨ 已创建新会话（ID: {sid}）")
+        print(f"   提示：输入 /sessions 管理历史，输入 /save 手动保存当前标题")
+
+    def _try_session_command(self, text: str) -> str | None:
+        """
+        识别 / 开头的持久化命令。
+        返回 None 表示不是命令；返回 'quit' 表示退出；返回 "" 表示已处理。
+        """
+        if not text.startswith("/"):
+            return None
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+
+        if cmd in ("/quit", "/exit"):
+            return "quit"
+        elif cmd == "/help":
+            print("""
+可用命令：
+  /sessions        列出所有历史会话
+  /load <编号>     加载指定会话（按 /sessions 的编号）
+  /new             创建新会话
+  /save [标题]     保存当前会话（可附带新标题）
+  /rename <标题>   重命名当前会话
+  /delete <编号>   删除指定会话
+  /clear           清空当前会话的消息历史
+  /current         显示当前会话信息
+  /db              显示数据库路径
+  /help            显示此帮助
+  /quit            退出程序
+""")
+            return ""
+        elif cmd == "/sessions":
+            sessions = self.store.list_sessions(limit=20)
+            if not sessions:
+                print("  暂无历史会话")
+            else:
+                print(f"\n📁 历史会话（共 {len(sessions)} 个）：")
+                for i, s in enumerate(sessions, 1):
+                    cur_tag = " ← 当前" if s.id == self.session_id else ""
+                    mode_tag = f"[{s.mode}]" if s.mode != "chat" else ""
+                    print(f"   {i}. {s.title} {mode_tag} "
+                          f"({self.store.count_messages(s.id)} 条){cur_tag}")
+            return ""
+        elif cmd == "/load":
+            sessions = self.store.list_sessions(limit=20)
+            if not sessions:
+                print("  暂无历史会话")
+                return ""
+            try:
+                idx = int(arg) - 1
+                if 0 <= idx < len(sessions):
+                    sid = sessions[idx].id
+                    saved = self.store.load_messages(sid)
+                    print(f"  ✅ 已加载「{sessions[idx].title}」（{len(saved)} 条消息）")
+                    self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}] + saved
+                    self.session_id = sid
+                    return ""
+            except ValueError:
+                pass
+            print("  用法: /load <编号>（编号来自 /sessions）")
+            return ""
+        elif cmd == "/new":
+            sid = self.store.create_session(title="新会话", mode="chat")
+            self.session_id = sid
+            self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
+            print(f"  ✨ 已创建新会话（ID: {sid}）")
+            return ""
+        elif cmd == "/save":
+            if not self.session_id:
+                print("  当前无活动会话")
+                return ""
+            title = arg or self.store.get_session(self.session_id).title
+            self.store.rename_session(self.session_id, title)
+            print(f"  💾 已保存为「{title}」")
+            return ""
+        elif cmd == "/rename":
+            if not self.session_id:
+                print("  当前无活动会话")
+                return ""
+            if not arg:
+                print("  用法: /rename <新标题>")
+                return ""
+            self.store.rename_session(self.session_id, arg)
+            print(f"  ✏️ 已重命名为「{arg}」")
+            return ""
+        elif cmd == "/delete":
+            sessions = self.store.list_sessions(limit=20)
+            try:
+                idx = int(arg) - 1
+                if 0 <= idx < len(sessions):
+                    sid = sessions[idx].id
+                    confirm = input(f"  确认删除「{sessions[idx].title}」？(y/N): ").strip().lower()
+                    if confirm == "y":
+                        self.store.delete_session(sid)
+                        if sid == self.session_id:
+                            self.session_id = None
+                            self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
+                        print(f"  🗑️ 已删除")
+                    else:
+                        print("  已取消")
+                    return ""
+            except ValueError:
+                pass
+            print("  用法: /delete <编号>")
+            return ""
+        elif cmd == "/clear":
+            if self.session_id:
+                self.store.clear_messages(self.session_id)
+                print("  🧹 已清空当前会话的消息历史（会话本身保留）")
+            else:
+                print("  当前无活动会话")
+            return ""
+        elif cmd == "/current":
+            if self.session_id:
+                s = self.store.get_session(self.session_id)
+                print(f"  当前会话: {s.title} [{s.mode}]")
+                print(f"  消息数: {self.store.count_messages(self.session_id)}")
+            else:
+                print("  当前无活动会话")
+            return ""
+        elif cmd == "/db":
+            print(f"  数据库路径: {self.store.db_path}")
+            print(f"  绝对路径:   {os.path.abspath(self.store.db_path)}")
+            return ""
+        else:
+            print(f"  未知命令：{cmd}，输入 /help 查看所有命令")
+            return ""
 
 
 if __name__ == "__main__":
