@@ -226,8 +226,8 @@ def main():
     new_commit_sha = make_commit(new_tree_sha, args.message, head_sha)
     print(f"新 commit: {new_commit_sha[:12]}")
 
-    # 6. 更新 refs/heads/main
-    subprocess.run(["git", "update-ref", "refs/heads/main", new_commit_sha], check=True)
+    # 6. 更新当前分支（跟随 HEAD 指向的分支，避免硬编码 refs/heads/main 在 master 等分支上失效）
+    subprocess.run(["git", "update-ref", "HEAD", new_commit_sha], check=True)
     # 7. 同步索引，让 `git status` 显示干净（之前 git_commit.py 后总是需要手动 reset）
     subprocess.run(["git", "read-tree", "HEAD"], check=True, capture_output=True)
 
