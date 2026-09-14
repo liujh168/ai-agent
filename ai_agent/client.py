@@ -8,6 +8,7 @@ RAGKnowledgeBase 已拆分到 ai_agent/rag.py。
 import base64
 import json
 import logging
+import os
 import re
 import time
 
@@ -24,10 +25,11 @@ log = logging.getLogger("Agent")
 class LMStudioClient:
     """LM Studio API 客户端，自动检测模型是否已加载"""
 
-    def __init__(self, base_url: str = "http://localhost:1234/v1", api_key: str = "lm-studio"):
-        self.base_url = base_url
+    def __init__(self, base_url: str = "http://localhost:1234/v1", api_key: str = "lm-studio", model: str = "auto"):
+        self.base_url = os.environ.get("LM_STUDIO_BASE_URL", base_url)
         self.api_key = api_key
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
+        self.model = os.environ.get("LM_STUDIO_MODEL", model)
+        self.client = OpenAI(base_url=self.base_url, api_key=api_key)
         self._model_checked = False  # 只在首次调用时打印状态
 
     def check_server_status(self) -> dict:
@@ -67,7 +69,8 @@ class LMStudioClient:
                 "LM Studio 服务已运行，但未加载模型。请在 LM Studio 中加载一个模型后重试。"
             )
         if not self._model_checked:
-            print(f"[OK] 服务运行中，已加载模型: {status['model_name']}")
+            target = f" → {self.model}" if self.model != "auto" else " (auto)"
+            log.info("服务运行中，已加载模型: %s%s", status["model_name"], target)
             self._model_checked = True
         return status["model_name"]
 
@@ -106,7 +109,7 @@ class LMStudioClient:
         """发送聊天请求，自动检测模型加载状态"""
         self.ensure_model_loaded()
         response = self.client.chat.completions.create(
-            model="auto", messages=messages,
+            model=self.model, messages=messages,
             temperature=temperature, max_tokens=max_tokens, stream=stream,
         )
         if stream:
@@ -117,7 +120,7 @@ class LMStudioClient:
         """流式聊天，逐 token 输出"""
         self.ensure_model_loaded()
         stream = self.client.chat.completions.create(
-            model="auto", messages=messages,
+            model=self.model, messages=messages,
             temperature=temperature, max_tokens=max_tokens, stream=True,
         )
         def _generator():
@@ -142,7 +145,7 @@ class LMStudioClient:
 
         for _ in range(max_iterations):
             response = self.client.chat.completions.create(
-                model="auto", messages=history, tools=tools,
+                model=self.model, messages=history, tools=tools,
                 temperature=temperature, max_tokens=max_tokens,
             )
             choice = response.choices[0]
@@ -240,7 +243,7 @@ class LMStudioClient:
         for iteration in range(1, max_iterations + 1):
             print(f"│\n│  🔄 第 {iteration} 轮")
             response = self.client.chat.completions.create(
-                model="auto", messages=history,
+                model=self.model, messages=history,
                 temperature=temperature, max_tokens=max_tokens,
             )
             raw = response.choices[0].message.content or ""
@@ -320,7 +323,7 @@ class LMStudioClient:
         last = guided[-1]
         guided[-1] = {**last, "content": f"{last['content']}\n\n{chain_prompt}"}
         response = self.client.chat.completions.create(
-            model="auto", messages=guided, temperature=temperature, max_tokens=max_tokens,
+            model=self.model, messages=guided, temperature=temperature, max_tokens=max_tokens,
         )
         return response.choices[0].message.content
 
@@ -329,7 +332,7 @@ class LMStudioClient:
         self.ensure_model_loaded()
         try:
             response = self.client.chat.completions.create(
-                model="auto", messages=messages,
+                model=self.model, messages=messages,
                 temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort,
             )
         except Exception as e:
@@ -350,7 +353,7 @@ class LMStudioClient:
 
         def _ask() -> str:
             return self.client.chat.completions.create(
-                model="auto", messages=history,
+                model=self.model, messages=history,
                 temperature=temperature, max_tokens=max_tokens,
             ).choices[0].message.content
 
@@ -384,7 +387,7 @@ class LMStudioClient:
         with open(image_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
         response = self.client.chat.completions.create(
-            model="auto",
+            model=self.model,
             messages=[{"role": "user", "content": [
                 {"type": "text", "text": question},
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
@@ -402,7 +405,7 @@ class LMStudioClient:
             f"任务：{task}"
         )
         plan_text = self.client.chat.completions.create(
-            model="auto", messages=[{"role": "user", "content": plan_prompt}],
+            model=self.model, messages=[{"role": "user", "content": plan_prompt}],
             temperature=temperature, max_tokens=max_tokens,
         ).choices[0].message.content
 
@@ -427,7 +430,7 @@ class LMStudioClient:
                 "请完成这个子任务，输出可以直接合并到最终成果的内容，不要复述整体任务。"
             )
             result = self.client.chat.completions.create(
-                model="auto", messages=[{"role": "user", "content": exec_prompt}],
+                model=self.model, messages=[{"role": "user", "content": exec_prompt}],
                 temperature=temperature, max_tokens=max_tokens,
             ).choices[0].message.content
             print(f"\n[子任务 {i}/{len(subtasks)}] {st}")
@@ -452,7 +455,7 @@ class LMStudioClient:
 
         def _generate(extra_hint: str = "") -> str:
             return self.client.chat.completions.create(
-                model="auto",
+                model=self.model,
                 messages=[{"role": "user", "content": prompt + extra_hint}],
                 temperature=temperature, max_tokens=max_tokens,
             ).choices[0].message.content

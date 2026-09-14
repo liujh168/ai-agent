@@ -1,6 +1,6 @@
 # 本地 AI Agent 交互式演示（学习项目）
 
-基于 **LM Studio 本地大模型** 的交互式 AI Agent 学习演示平台。一个统一的自然语言入口，驱动 **18 种 LLM/Agent 核心能力** 的自主路由与展示，帮助理解 Agent 的底层工作方式。
+基于 **LM Studio 本地大模型** 的交互式 AI Agent 学习演示平台。一个统一的自然语言入口，驱动 **21 种 LLM/Agent 核心能力** 的自主路由与展示，帮助理解 Agent 的底层工作方式。
 
 > 深度理念文章：[通用 Agent 时代价值迁移](docs/通用Agent时代价值迁移.md)
 
@@ -35,6 +35,9 @@ AI-Agent/
 │   │                             #   structured_extract（JSON 结构化）
 │   │                             #   summarize_messages（长对话压缩）
 │   ├── rag.py                   # RAGKnowledgeBase — PDF/MD/TXT → embedding → 余弦检索
+│   ├── app_core.py              # 共享模块：SYSTEM_PROMPT + TOOL_SCHEMAS + build_tool_map()
+│   │                             #   CLI 与 Web UI 共用，消除两份实现漂移
+│   ├── config.py                # Config — 集中读取 LM Studio / 嵌入模型 / 分块参数
 │   ├── tools/                   # 10 个模块级工具函数 + TOOL schema
 │   │   ├── __init__.py          # 统一 re-export + 9 个 TOOL schema + FEW_SHOT_TEMPLATES
 │   │   ├── demo.py              # get_weather, calculator
@@ -162,7 +165,7 @@ python -m ai_agent.eval --tag react
 
 | 阶段 | 内容 |
 |------|------|
-| ✅ 已完成 | 18 能力交互演示 · RAG 知识库 · 反思/规划/工具路由等 Agent 核心模式 · 安全边界 · 单元测试（安全边界） |
+| ✅ 已完成 | 21 能力交互演示 · RAG 知识库 · 反思/规划/工具路由等 Agent 核心模式 · 安全边界 · 单元测试（安全边界） |
 | 📌 下一步 | ReAct 模式（thought→action→observation 可见轨迹）· 评测集框架（gold cases + 自测模式）· README/文档对齐 |
 | 🚀 后续 | Web UI（Gradio/Streamlit 可视化）· 对话持久化 · 多 Agent 协作演示 · 生产级沙箱评估 |
 

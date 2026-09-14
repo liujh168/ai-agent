@@ -40,21 +40,17 @@ log = logging.getLogger("Agent")
 ROLE_PROMPTS = {
     "planner": (
         "你是一个严谨的任务规划者（Planner）。"
-        "你的职责是把复杂的用户请求拆解为有序、可执行的子任务。\n"
-        "规划原则：\n"
-        "1. 每个子任务必须具体、可独立完成，不要写模糊的描述；\n"
-        "2. 子任务按依赖关系排序，前一个的产出是后一个的输入；\n"
-        "3. 总数控制在 3-5 个，太多表示拆分过细，太少表示没拆开；\n"
-        "4. 最后一个子任务必须是「汇总/整合前面结果 + 给用户最终交付」。\n\n"
-        "输出格式（严格遵守）：\n"
-        "  ## 规划思路\n"
-        "  （一段话，说明整体分解逻辑）\n"
-        "  ## 子任务清单\n"
-        "  1. 子任务描述\n"
-        "  2. 子任务描述\n"
-        "  ...\n\n"
-        "如果评审者（Critic）批评了你的计划，请根据批评意见重新规划，"
-        "输出完整的新计划，不要复述旧计划的错误。"
+        "你的职责是把用户请求拆解为 2-4 个有序、可执行的子任务。\n\n"
+        "严格按以下格式输出（只输出子任务清单，不要解释）：\n"
+        "  1. 第一个子任务的具体描述\n"
+        "  2. 第二个子任务的具体描述\n"
+        "  3. 第三个子任务的具体描述\n\n"
+        "要求：\n"
+        "- 每行以数字+点+空格开头（如 '1. '）\n"
+        "- 不要用「## 规划思路」「## 子任务清单」等标题\n"
+        "- 子任务按依赖关系排序\n"
+        "- 最后一个子任务应是整合/交付\n"
+        "- 总数 2-4 个，太少是没拆开，太多是拆过细"
     ),
     "executor": (
         "你是一个高效的执行者（Executor）。"
@@ -131,6 +127,7 @@ def run_multi_agent(
     max_rounds: int = 3,
     temperature: float = 0.7,
     max_tokens: int = 2048,
+    trace_callback=None,  # 可选：每行 print 文本会传给这个 callback
 ) -> str:
     """
     完整的 Planner → Executor → Critic 三角色协作流程。
@@ -139,37 +136,43 @@ def run_multi_agent(
         client: LMStudioClient 实例
         user_task: 用户的复杂任务
         max_rounds: Critic 不通过时最多重试几轮
+        trace_callback: 可选 callable(line)，每行进度文本会被回调
     返回:
         最终汇总的执行结果字符串
     """
+    def _emit(line: str) -> None:
+        if trace_callback is not None:
+            trace_callback(line)
+        else:
+            print(line, flush=True)
+
     separator = "\n" + "=" * 50 + "\n"
 
-    print(f"\n{separator}")
-    print(f"🤝 多 Agent 协作启动（Planner + Executor + Critic）")
-    print(f"📋 用户任务: {user_task}")
-    print(separator)
+    _emit(f"\n{separator}")
+    _emit(f"🤝 多 Agent 协作启动（Planner + Executor + Critic）")
+    _emit(f"📋 用户任务: {user_task}")
+    _emit(separator)
 
     # ---------- Phase 1: Planner 出计划 ----------
-    print(f"\n👤 [Planner] 正在规划...")
+    _emit(f"\n👤 [Planner] 正在规划...")
     planner_msgs = [
         {"role": "system", "content": ROLE_PROMPTS["planner"]},
         {"role": "user", "content": f"请为下面的任务制定执行计划：\n\n{user_task}"},
     ]
     plan_text = client.chat(planner_msgs, temperature=temperature, max_tokens=max_tokens)
-    print(f"\n📊 Planner 输出:\n{plan_text}")
+    _emit(f"\n📊 Planner 输出:\n{plan_text}")
 
     subtasks = _parse_subtasks(plan_text)
     if not subtasks:
-        # 没解析出来 → 就把整个 plan 当作一个子任务
         subtasks = [plan_text.strip()]
-        print(f"\n[WARN] 未能解析出子任务清单，将整个计划作为一个子任务执行")
-    print(f"\n🔍 解析到 {len(subtasks)} 个子任务:")
+        _emit(f"\n[WARN] 未能解析出子任务清单，将整个计划作为一个子任务执行")
+    _emit(f"\n🔍 解析到 {len(subtasks)} 个子任务:")
     for i, st in enumerate(subtasks, 1):
-        print(f"   {i}. {st[:50]}{'…' if len(st) > 50 else ''}")
+        _emit(f"   {i}. {st[:50]}{'…' if len(st) > 50 else ''}")
 
     # ---------- Phase 2: Critic 审计划 ----------
     for round_num in range(1, max_rounds + 1):
-        print(f"\n🔄 [第 {round_num} 轮] Critic 评审计划...")
+        _emit(f"\n🔄 [第 {round_num} 轮] Critic 评审计划...")
         critic_msgs = [
             {"role": "system", "content": ROLE_PROMPTS["critic"]},
             {"role": "user", "content": (
@@ -182,14 +185,13 @@ def run_multi_agent(
             )},
         ]
         critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=max_tokens)
-        print(f"\n📝 Critic 评审:\n{critic_reply}")
+        _emit(f"\n📝 Critic 评审:\n{critic_reply}")
 
         if _parse_critic_decision(critic_reply):
-            print(f"\n✅ Critic 通过了 Planner 的计划！")
+            _emit(f"\n✅ Critic 通过了 Planner 的计划！")
             break
 
-        # 不通过 → 让 Planner 根据批评意见重规划
-        print(f"\n❌ Critic 不通过，让 Planner 根据批评意见重规划...")
+        _emit(f"\n❌ Critic 不通过，让 Planner 根据批评意见重规划...")
         planner_msgs = [
             {"role": "system", "content": ROLE_PROMPTS["planner"]},
             {"role": "user", "content": f"请为下面的任务制定执行计划：\n\n{user_task}"},
@@ -201,20 +203,19 @@ def run_multi_agent(
         ]
         plan_text = client.chat(planner_msgs, temperature=temperature, max_tokens=max_tokens)
         subtasks = _parse_subtasks(plan_text) or [plan_text.strip()]
-        print(f"\n📊 Planner 重新输出:\n{plan_text}")
-        print(f"\n🔍 新解析到 {len(subtasks)} 个子任务")
+        _emit(f"\n📊 Planner 重新输出:\n{plan_text}")
+        _emit(f"\n🔍 新解析到 {len(subtasks)} 个子任务")
     else:
-        print(f"\n[WARN] Critic 连续 {max_rounds} 轮不通过，将按当前计划继续执行")
+        _emit(f"\n[WARN] Critic 连续 {max_rounds} 轮不通过，将按当前计划继续执行")
 
     # ---------- Phase 3: Executor 逐个子任务执行 + Critic 审产出 ----------
     all_outputs = []
     accumulated_context = f"原始任务：{user_task}\n\n执行计划：\n{plan_text}"
 
     for i, subtask in enumerate(subtasks, 1):
-        print(f"\n{'─' * 40}")
-        print(f"⚙️  [Executor] 执行子任务 {i}/{len(subtasks)}: {subtask[:60]}...")
+        _emit(f"\n{'─' * 40}")
+        _emit(f"⚙️  [Executor] 执行子任务 {i}/{len(subtasks)}: {subtask[:60]}...")
 
-        # Executor 执行
         executor_msgs = [
             {"role": "system", "content": ROLE_PROMPTS["executor"]},
             {"role": "user", "content": (
@@ -225,11 +226,10 @@ def run_multi_agent(
             )},
         ]
         exec_output = client.chat(executor_msgs, temperature=temperature, max_tokens=max_tokens)
-        print(f"\n📄 Executor 子任务 {i} 产出:\n{exec_output[:300]}{'…' if len(exec_output) > 300 else ''}")
+        _emit(f"\n📄 Executor 子任务 {i} 产出:\n{exec_output[:300]}{'…' if len(exec_output) > 300 else ''}")
 
-        # Critic 审这个产出
         for round_num in range(1, max_rounds + 1):
-            print(f"\n🔍 Critic 评审子任务 {i} 产出（第 {round_num} 轮）...")
+            _emit(f"\n🔍 Critic 评审子任务 {i} 产出（第 {round_num} 轮）...")
             critic_msgs = [
                 {"role": "system", "content": ROLE_PROMPTS["critic"]},
                 {"role": "user", "content": (
@@ -241,13 +241,12 @@ def run_multi_agent(
                 )},
             ]
             critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=max_tokens)
-            print(f"   Critic: {critic_reply[:200]}{'…' if len(critic_reply) > 200 else ''}")
+            _emit(f"   Critic: {critic_reply[:200]}{'…' if len(critic_reply) > 200 else ''}")
 
             if _parse_critic_decision(critic_reply):
-                print(f"   ✅ Critic 通过了子任务 {i}")
+                _emit(f"   ✅ Critic 通过了子任务 {i}")
                 break
-            # 不通过 → 让 Executor 重做
-            print(f"   ❌ Critic 不通过，让 Executor 根据批评意见修正...")
+            _emit(f"   ❌ Critic 不通过，让 Executor 根据批评意见修正...")
             executor_msgs = [
                 {"role": "system", "content": ROLE_PROMPTS["executor"]},
                 {"role": "user", "content": (
@@ -258,22 +257,21 @@ def run_multi_agent(
                 )},
             ]
             exec_output = client.chat(executor_msgs, temperature=temperature, max_tokens=max_tokens)
-            print(f"   Executor 修正后产出: {exec_output[:200]}…")
+            _emit(f"   Executor 修正后产出: {exec_output[:200]}…")
         else:
-            print(f"   [WARN] Critic 连续 {max_rounds} 轮不通过，保留当前产出继续推进")
+            _emit(f"   [WARN] Critic 连续 {max_rounds} 轮不通过，保留当前产出继续推进")
 
         all_outputs.append((i, subtask, exec_output))
         accumulated_context += f"\n\n【子任务 {i} 完成】{subtask}\n{exec_output}"
 
     # ---------- Phase 4: 汇总 ----------
-    print(f"\n{separator}")
-    print(f"📦 汇总全部 {len(all_outputs)} 个子任务的最终产出...")
+    _emit(f"\n{separator}")
+    _emit(f"📦 汇总全部 {len(all_outputs)} 个子任务的最终产出...")
     summary_parts = []
     for i, st, out in all_outputs:
         summary_parts.append(f"【子任务 {i}：{st}】\n{out}")
     final_summary = "\n\n".join(summary_parts)
 
-    # 让 Planner 做最终整合
     final_integrate_msgs = [
         {"role": "system", "content": ROLE_PROMPTS["planner"]},
         {"role": "user", "content": (
@@ -284,8 +282,8 @@ def run_multi_agent(
     ]
     integrated = client.chat(final_integrate_msgs, temperature=temperature, max_tokens=max_tokens)
 
-    print(f"\n{separator}")
-    print(f"🎯 最终交付（已整合）:\n{integrated}")
-    print(separator)
+    _emit(f"\n{separator}")
+    _emit(f"🎯 最终交付（已整合）:\n{integrated}")
+    _emit(separator)
 
     return integrated

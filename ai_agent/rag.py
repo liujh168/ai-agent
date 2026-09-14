@@ -4,9 +4,12 @@ RAG 知识库 — 简易 PDF/MD/TXT → 本地 embedding 向量化 → 余弦相
 import os
 import pickle
 import re
+import logging
 
 import requests
 from pypdf import PdfReader
+
+log = logging.getLogger("Agent")
 
 
 class RAGKnowledgeBase:
@@ -72,14 +75,14 @@ class RAGKnowledgeBase:
         valid_paths = []
         for p in file_paths:
             if not os.path.exists(p):
-                print(f"  [RAG] 跳过不存在的文件: {p}")
+                log.info("RAG 跳过不存在的文件: %s", p)
                 continue
             ext = os.path.splitext(p)[1].lower()
             if ext not in self.SUPPORTED_EXT:
                 raise ValueError(f"不支持的文件类型 {ext}：{p}（仅支持 {self.SUPPORTED_EXT}）")
             valid_paths.append(p)
         if not valid_paths:
-            print("  [RAG] 无有效文件跳过构建")
+            log.info("RAG 无有效文件，跳过构建")
             return 0
 
         key = "|".join(

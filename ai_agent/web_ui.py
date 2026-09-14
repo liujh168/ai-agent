@@ -5,7 +5,7 @@ AI Agent 学习演示 — Gradio Web UI
 
 UI 结构：
 ┌──────────────────────────────────────────────────────────┐
-│ 🤖 AI Agent 学习演示（基于 LM Studio · 20 种能力）         │
+│ 🤖 AI Agent 学习演示（基于 LM Studio · 自然语言路由）      │
 ├───────────────┬──────────────────────────────────────────┤
 │               │  💬 对话区（Gradio Chatbot）                │
 │ 📁 会话列表    │                                          │
@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import sys
+import threading
 import time
 import traceback
 
@@ -50,14 +52,13 @@ from ai_agent.client import LMStudioClient
 from ai_agent.rag import RAGKnowledgeBase
 from ai_agent.multi_agent import run_multi_agent
 from ai_agent.persistence import ChatStore, DEFAULT_DB_PATH
-from ai_agent.tools import (
-    run_code, get_weather, calculator, web_search,
-    file_read, file_write, sql_query, run_terminal, human_confirm,
-    WEATHER_TOOL, CALCULATOR_TOOL, WEB_SEARCH_TOOL,
-    FILE_READ_TOOL, FILE_WRITE_TOOL, SQL_QUERY_TOOL,
-    RUN_TERMINAL_TOOL, HUMAN_CONFIRM_TOOL,
-    DEMO_FEW_SHOT_TOOL, SUMMARIZE_TOOL,
-    FEW_SHOT_TEMPLATES,
+from ai_agent.config import Config
+from ai_agent.app_core import (
+    SYSTEM_PROMPT as _CORE_SYSTEM_PROMPT,
+    TOOL_SCHEMAS,
+    TOOL_COUNT,
+    build_tool_map,
+    clean_react_tool_map,
 )
 
 try:
@@ -71,30 +72,16 @@ except ImportError:
 # 全局状态（单例）
 # ============================================================
 
-SYSTEM_PROMPT = (
-    "你是一个交互式演示助手，负责向用户展示 LLM 的各项能力。"
-    "根据用户的自然语言请求，选择合适的工具来完成演示：\n"
-    "- 用户要求【ReAct/边想边做/思考与行动交替/推理轨迹】时，调用 demo_react；\n"
-    "- 用户要求【多 Agent/多智能体/Planner/Executor/Critic/角色协作】时，调用 run_multi_agent；\n"
-    "- 用户要求【写代码并运行/编程计算题】时，调用 demo_code_run；\n"
-    "- 用户要求【查看文件/读取文件】时，调用 file_read；\n"
-    "- 用户要求【创建文件/写入文件】时，调用 file_write；\n"
-    "- 用户要求【查数据库/SQL查询】时，调用 sql_query；\n"
-    "- 用户询问【AI Agent 概念/资料/知识库】时，调用 search_knowledge；\n"
-    "- 用户询问【最新信息/搜索一下】时，调用 web_search；\n"
-    "- 用户要求【反思/自我修正】时，调用 reflexion_answer；\n"
-    "- 用户询问【天气】时，调用 get_weather；\n"
-    "- 用户要求【计算】时，调用 calculator；\n"
-    "- 用户要求【Few-shot/示例演示/提示词工程】时，调用 demo_few_shot；\n"
-    "- 普通聊天直接回答，不需要调用工具。"
-)
+# 与 CLI 共用同一份系统提示词（app_core 单一真相源），保证路由一致
+SYSTEM_PROMPT = _CORE_SYSTEM_PROMPT
 
 
 class AgentApp:
     """Web UI 后端：包装 Client + Tool_map + 持久化 + 模式切换"""
 
-    def __init__(self, db_path: str = DEFAULT_DB_PATH):
-        self.client = LMStudioClient()
+    def __init__(self, db_path: str = DEFAULT_DB_PATH, disable_dangerous: bool = False):
+        self.cfg = Config.from_env()
+        self.client = LMStudioClient(self.cfg.base_url, self.cfg.api_key, self.cfg.model)
         self.rag: RAGKnowledgeBase | None = None
         self.store = ChatStore(db_path)
         self.session_id: str | None = None
@@ -102,64 +89,64 @@ class AgentApp:
         self.mode: str = "chat"  # chat / react / multi_agent
         # 工具调用轨迹 + ReAct 轨迹（用于 UI 实时展示）
         self.trace_buffer: list[str] = []
+        # 测试图片（demo_vision 默认图），与 CLI 的 TEST_IMAGE 对应
+        self.test_image: str = "_test_chart.png"
+        # 公网分享（--share）时关闭高危工具（任意代码/命令执行）
+        self.disable_dangerous: bool = disable_dangerous
 
-        # 注册工具（简化版，保留核心演示）
+        # 注册工具（与 CLI 共用 build_tool_map，保证能力一致）
         self.tool_map: dict = {}
         self._register_tools()
 
     # ---------- 工具注册 ----------
 
     def _register_tools(self) -> None:
-        self.tool_map["get_weather"] = get_weather
-        self.tool_map["calculator"] = calculator
-        self.tool_map["web_search"] = web_search
-        self.tool_map["file_read"] = file_read
-        self.tool_map["file_write"] = file_write
-        self.tool_map["sql_query"] = sql_query
-        self.tool_map["run_terminal"] = run_terminal
-        self.tool_map["human_confirm"] = human_confirm
-        self.tool_map["demo_code_run"] = run_code
+        self.tool_map = build_tool_map(
+            self.client, lambda: self.rag, self.test_image,
+            get_history=lambda: self.history,
+            set_history=lambda h: setattr(self, "history", h),
+        )
+        # Web 模式不支持终端交互式人工确认 → 替换为安全提示，避免 input() 卡死 Gradio 线程
+        self.tool_map["human_confirm"] = self._web_human_confirm
+        # 公网分享时关闭高危工具（任意代码 / 命令执行）
+        if self.disable_dangerous:
+            for name in ("demo_code_run", "run_terminal"):
+                self.tool_map.pop(name, None)
 
-        def search_knowledge(q):
-            if self.rag is None:
-                return "知识库不可用"
-            return self.rag.answer(q, self.client)
-
-        def demo_few_shot(question, task_type="sentiment"):
-            template = FEW_SHOT_TEMPLATES.get(task_type, FEW_SHOT_TEMPLATES["sentiment"])
-            examples = "\n\n".join(
-                f"[示例 {i+1}]\n输入：{inp}\n输出：{out}"
-                for i, (inp, out) in enumerate(template["examples"])
-            )
-            prompt = (
-                f"通过以下示例理解任务模式，然后对新问题给出答案。\n\n"
-                + examples + f"\n\n输入：{question}\n输出："
-            )
-            return self.client.chat([{"role": "user", "content": prompt}], temperature=0.1)
-
-        self.tool_map["search_knowledge"] = search_knowledge
-        self.tool_map["demo_few_shot"] = demo_few_shot
+    def _web_human_confirm(self, action: str) -> str:
+        """Web 模式下的安全替代：不阻塞 Gradio 线程，仅给出提示"""
+        return (
+            "⚠️ Web 模式下不支持终端交互式人工确认。"
+            "如确需执行敏感/破坏性操作，请在本地 CLI 环境运行。"
+        )
 
     # ---------- RAG 初始化 ----------
 
     def init_rag(self):
         if self.rag is None:
             try:
-                self.rag = RAGKnowledgeBase()
+                self.rag = RAGKnowledgeBase(
+                    base_url=self.cfg.base_url,
+                    embed_model=self.cfg.embed_model,
+                    chunk_size=self.cfg.chunk_size,
+                    chunk_overlap=self.cfg.chunk_overlap,
+                    cache_file=self.cfg.rag_cache_file,
+                )
                 self.rag.build(["docs/通用Agent时代价值迁移.md"])
             except Exception as e:
                 print(f"RAG 初始化失败: {e}")
 
-    # ---------- 发送消息（核心入口）----------
+    # ---------- 发送消息（核心入口 · generator 流式更新）----------
 
-    def send(self, user_text: str, history: list[tuple]) -> tuple[str, list[tuple]]:
+    def send(self, user_text: str, history: list[tuple]):
         """
-        Gradio Chatbot 回调。
-        history: Gradio 格式 [(user_msg, assistant_msg), ...]
-        返回: (trace_text, new_history)
+        Gradio Chatbot generator 回调。
+        每 yield 一次，Gradio 就更新一次 UI。
+        返回: yield (trace_text, new_history, input_clear)
         """
         if not user_text.strip():
-            return "", history
+            yield self.trace_text(), history, ""
+            return
 
         # 初始化 RAG（延迟加载）
         self.init_rag()
@@ -179,25 +166,76 @@ class AgentApp:
         # 追加到 history（OpenAI 格式）
         self.history.append({"role": "user", "content": user_text})
 
+        # Gradio history 先占位（用户消息 + 空回复）
+        gradio_hist = list(history or []) + [(user_text, "")]
+
+        # ---------- 多 Agent 模式：后台线程 + queue 逐步刷新 ----------
+        if self.mode == "multi_agent":
+            self.trace("🤖 模式: 多 Agent 协作（Planner → Executor → Critic）")
+            yield self.trace_text(), gradio_hist, ""
+
+            trace_q: queue.Queue = queue.Queue()
+            result_holder: dict = {"reply": None, "error": None}
+
+            def worker():
+                def on_trace(line):
+                    trace_q.put(line)
+                try:
+                    result_holder["reply"] = run_multi_agent(
+                        self.client, user_text,
+                        max_rounds=2, max_tokens=2048,
+                        trace_callback=on_trace,
+                    )
+                except Exception as e:
+                    result_holder["error"] = f"{type(e).__name__}: {e}"
+
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+
+            # 轮询 queue + yield
+            while t.is_alive() or not trace_q.empty():
+                # 把 queue 里所有新行都取出来
+                got_new = False
+                while not trace_q.empty():
+                    try:
+                        line = trace_q.get_nowait()
+                        self.trace(line)
+                        got_new = True
+                    except queue.Empty:
+                        break
+                if got_new or t.is_alive():
+                    yield self.trace_text(), gradio_hist, ""
+                t.join(timeout=0.3)
+
+            # 最终
+            if result_holder["error"]:
+                reply = f"[异常] {result_holder['error']}"
+                self.history.pop()
+            else:
+                reply = result_holder["reply"] or "(无输出)"
+
+            self.history.append({"role": "assistant", "content": reply})
+            self.store.append(self.session_id, "assistant", reply)
+            gradio_hist[-1] = (user_text, reply)
+            yield self.trace_text(), gradio_hist, ""
+            return
+
+        # ---------- 其他模式：同步跑完 yield 最终结果 ----------
         try:
             if self.mode == "react":
                 reply = self._react_mode(user_text)
-            elif self.mode == "multi_agent":
-                reply = self._multi_agent_mode(user_text)
             else:
                 reply = self._chat_mode()
         except RuntimeError as e:
             reply = f"[错误] {e}"
-            self.history.pop()  # 失败时不保留用户消息
+            self.history.pop()
         except Exception as e:
             reply = f"[异常] {type(e).__name__}: {e}\n\n{traceback.format_exc()[:500]}"
 
         self.history.append({"role": "assistant", "content": reply})
         self.store.append(self.session_id, "assistant", reply)
-
-        # 更新 Gradio history
-        history.append((user_text, reply))
-        return self.trace_text(), history
+        gradio_hist[-1] = (user_text, reply)
+        yield self.trace_text(), gradio_hist, ""
 
     def _chat_mode(self) -> str:
         """普通对话模式 — chat_with_tools，拦截工具调用展示到 trace"""
@@ -220,24 +258,8 @@ class AgentApp:
             hooked_map[name] = make_hook(name, func)
 
         tools = [
-            WEATHER_TOOL, CALCULATOR_TOOL, WEB_SEARCH_TOOL,
-            FILE_READ_TOOL, FILE_WRITE_TOOL, SQL_QUERY_TOOL,
-            RUN_TERMINAL_TOOL, HUMAN_CONFIRM_TOOL,
-            DEMO_FEW_SHOT_TOOL, SUMMARIZE_TOOL,
-            {
-                "type": "function", "function": {
-                    "name": "demo_code_run",
-                    "description": "执行 Python 代码并返回输出/错误",
-                    "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
-                }
-            },
-            {
-                "type": "function", "function": {
-                    "name": "search_knowledge",
-                    "description": "RAG 知识库问答",
-                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]},
-                }
-            },
+            s for s in TOOL_SCHEMAS
+            if not (self.disable_dangerous and s["function"]["name"] in ("demo_code_run", "run_terminal"))
         ]
 
         try:
@@ -255,6 +277,14 @@ class AgentApp:
         if total_chars > 5000:
             self.trace(f"[系统] 对话过长 ({total_chars} 字符)，自动压缩...")
             self.history = self.client.summarize_messages(self.history, keep_recent=4)
+            # 压缩后回写数据库，保证会话恢复时历史一致（与 CLI 行为对齐）
+            if self.session_id:
+                self.store.clear_messages(self.session_id)
+                for m in self.history[1:]:
+                    self.store.append(
+                        self.session_id, m["role"], m.get("content", ""),
+                        m.get("tool_calls"),
+                    )
 
         return reply
 
@@ -269,7 +299,7 @@ class AgentApp:
         with contextlib.redirect_stdout(buf):
             reply = self.client.chat_with_react(
                 [{"role": "user", "content": user_text}],
-                tool_map=self.tool_map,
+                tool_map=clean_react_tool_map(self.tool_map),
             )
         # 把 print 输出也拼到 trace
         for line in buf.getvalue().splitlines():
@@ -279,17 +309,8 @@ class AgentApp:
         return reply
 
     def _multi_agent_mode(self, user_text: str) -> str:
-        """多 Agent 模式"""
-        self.trace("🤖 模式: 多 Agent 协作（Planner → Executor → Critic）")
-
-        import io, contextlib
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            reply = run_multi_agent(self.client, user_text)
-        for line in buf.getvalue().splitlines():
-            self.trace(line)
-
-        return reply
+        """已废弃：多 Agent 模式现在在 send() generator 里直接处理"""
+        raise RuntimeError("不要直接调用 _multi_agent_mode，请通过 send()")
 
     def trace(self, text: str) -> None:
         """追加一行到 trace buffer"""
@@ -349,7 +370,7 @@ def build_ui() -> gr.Blocks:
     ) as demo:
         gr.Markdown(
             "# 🤖 AI Agent 学习演示 · Web UI\n"
-            "基于 LM Studio 本地大模型 · 20 种能力 · 自然语言路由\n"
+            f"基于 LM Studio 本地大模型 · {TOOL_COUNT} 种能力 · 自然语言路由\n"
             "对话自动持久化到 SQLite，支持多会话恢复"
         )
 
@@ -448,8 +469,7 @@ def build_ui() -> gr.Blocks:
             return trace, hist, on_session_list_refresh()
 
         def on_send(user_text, history):
-            trace, new_hist = _app.send(user_text or "", history or [])
-            return trace, new_hist, ""
+            yield from _app.send(user_text or "", history or [])
 
         def on_clear():
             _app.history = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -494,6 +514,12 @@ def main():
     parser.add_argument("--port", type=int, default=7860, help="端口")
     parser.add_argument("--share", action="store_true", help="生成公网分享链接")
     args = parser.parse_args()
+
+    # 公网分享时强制关闭高危工具（任意代码 / 命令执行），避免远程 RCE
+    if args.share:
+        _app.disable_dangerous = True
+        _app._register_tools()
+        print("⚠️ 已开启公网分享，已自动禁用 run_code / run_terminal 等高危工具")
 
     print(f"\n🚀 启动 AI Agent Web UI")
     print(f"   地址: http://{args.host}:{args.port}")

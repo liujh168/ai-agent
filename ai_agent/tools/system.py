@@ -42,18 +42,40 @@ def run_code(code: str) -> str:
 # 匹配逻辑：子串命中 → 拦截；大小写不敏感
 _DANGEROUS_CMD_PATTERNS = [
     # Unix 风格（跨平台）
-    "rm -rf /", "rm -rf *", "rm -rf .", ">nul", ":(){ :|:& };:",
+    "rm -rf /", "rm -rf *", "rm -rf .", "rm -r /", "rm -r *", "rm -r .",
+    "rm /r", "rm -r ", "rm ",
+    ">nul", ":(){ :|:& };:",
     "mkfs", "dd if=",
     # Windows / PowerShell 原生命令
     "Remove-Item -Recurse -Force", "Remove-Item -Recurse", "Remove-Item *",
-    "Stop-Computer", "Restart-Computer", "Stop-Process -Force",
+    "Remove-Item", "Remove-Item ",
+    "Stop-Computer", "Restart-Computer", "Stop-Process -Force", "Stop-Process ",
     "Format-Volume", "Format-Drive",
     "Set-Content", "Out-File", "Add-Content",
-    "Invoke-WebRequest", "curl.exe",
+    "Invoke-WebRequest", "Invoke-Expression", "iex ", "curl.exe",
     "powershell -Enc", "-EncodedCommand",
-    # cmd 风格
-    "del /s", "rd /s", "shutdown", "reboot", "format c:",
+    # cmd 风格（覆盖无 /s 的变体）
+    "del /s", "del /q", "del /f", "del ", "rd /s", "rd ", "rmdir", "rmdir ",
+    "shutdown", "shutdown /s", "shutdown /r", "reboot", "taskkill",
+    "format c:", "format d:", "format ", "reg delete", "cmd /c", "cmd /k",
 ]
+
+# 链式拼接绕过防护：危险动词 + 链接符（& | ; && ||）视为绕过尝试
+_DANGEROUS_VERBS = [
+    "rm ", "del ", "rmdir", "rd ", "format ", "remove-item", "reg delete",
+    "shutdown", "taskkill", "mkfs", "dd if=", "stop-computer", "restart-computer",
+    "stop-process", "format-volume", "format-drive", "iex ", "invoke-expression",
+]
+_CHAIN_OPS = ["&&", "||", "&", "|", ";"]
+
+
+def _is_dangerous_chain(command: str) -> str | None:
+    """检测「危险动词 + 链接符」的绕过手法（如 cmd /c del x、rm x & echo）"""
+    low = command.lower()
+    for verb in _DANGEROUS_VERBS:
+        if verb in low and any(op in command for op in _CHAIN_OPS):
+            return verb.strip()
+    return None
 
 
 def run_terminal(command: str, timeout: int = 15) -> str:
@@ -65,6 +87,14 @@ def run_terminal(command: str, timeout: int = 15) -> str:
     for pat in _DANGEROUS_CMD_PATTERNS:
         if pat.lower() in cmd_lower:
             return f"⚠️ 安全拦截：命令包含危险关键词 '{pat}'。教学 demo 环境禁止执行破坏性命令。"
+
+    # 链式拼接绕过防护
+    bypass_verb = _is_dangerous_chain(command)
+    if bypass_verb:
+        return (
+            f"⚠️ 安全拦截：检测到危险命令通过链式拼接执行"
+            f"（含 '{bypass_verb}' 与链接符 &/|/;）。教学 demo 环境禁止。"
+        )
 
     try:
         if sys.platform.startswith("win"):

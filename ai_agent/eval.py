@@ -371,6 +371,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Agent 评测集 — 自测模式")
     parser.add_argument("--list", action="store_true", help="列出所有评测用例，不执行")
     parser.add_argument("--tag", type=str, default=None, help="只运行指定 capability 标签的用例")
+    parser.add_argument("--no-rag", action="store_true", help="跳过 RAG 知识库构建（评测无需 RAG 时加快启动）")
     args = parser.parse_args()
 
     if args.list:
@@ -406,7 +407,11 @@ def main() -> None:
         sys.exit(1)
 
     # 初始化：RAG（评测用例里可能用到 sql 就不走 RAG，但 agent 初始化还是要）
-    app._build_knowledge_base()
+    if args.no_rag:
+        app.rag = None
+        print("ℹ️ 已跳过 RAG 知识库构建（--no-rag）")
+    else:
+        app._build_knowledge_base()
     app._register_tools()
 
     evaluator = Evaluator(

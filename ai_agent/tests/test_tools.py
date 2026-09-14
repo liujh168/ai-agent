@@ -99,7 +99,14 @@ class TestSQLQuery:
         self._db.close()
 
     def teardown_method(self):
-        os.remove(self._db.name)
+        # Windows 下文件可能仍被 Defender / 句柄短暂占用，重试删除
+        import time as _t
+        for _ in range(5):
+            try:
+                os.remove(self._db.name)
+                break
+            except PermissionError:
+                _t.sleep(0.2)
 
     def test_select_ok(self):
         r = sql_query(self._db.name, "SELECT COUNT(*) FROM users")
