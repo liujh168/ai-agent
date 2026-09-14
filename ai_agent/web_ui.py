@@ -346,11 +346,6 @@ _app = AgentApp()
 def build_ui() -> gr.Blocks:
     with gr.Blocks(
         title="AI Agent 学习演示 · Web UI",
-        theme=gr.themes.Soft(),
-        css="""
-        .trace-box { font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; }
-        .agent-title { text-align: center; padding: 8px; font-size: 20px; font-weight: bold; }
-        """,
     ) as demo:
         gr.Markdown(
             "# 🤖 AI Agent 学习演示 · Web UI\n"
@@ -406,7 +401,7 @@ def build_ui() -> gr.Blocks:
 
             # ---------- 右侧：对话 + 轨迹 ----------
             with gr.Column(scale=3):
-                chatbot = gr.Chatbot(height=380, show_copy_button=True)
+                chatbot = gr.Chatbot(height=380)
 
                 trace_output = gr.Textbox(
                     label="🔍 执行轨迹（工具调用 / ReAct 推理 / 多 Agent 消息传递）",
@@ -426,64 +421,64 @@ def build_ui() -> gr.Blocks:
                         btn_send = gr.Button("发送 🚀", variant="primary")
                         btn_clear = gr.Button("清空对话")
 
-    # ============================================================
-    # 事件绑定
-    # ============================================================
+        # ============================================================
+        # 事件绑定（必须在 with Blocks 上下文内）
+        # ============================================================
 
-    def on_mode_change(mode_val):
-        _app.set_mode(mode_val)
-        _app.trace(f"切换模式 → {mode_val}")
-        return _app.trace_text()
+        def on_mode_change(mode_val):
+            _app.set_mode(mode_val)
+            _app.trace(f"切换模式 → {mode_val}")
+            return _app.trace_text()
 
-    def on_session_list_refresh():
-        sessions = _app.list_sessions()
-        if not sessions:
-            choices = [("暂无历史会话", "")]
-        else:
-            choices = [(f"{title}  {info}", sid) for sid, title, info in sessions]
-        return gr.update(choices=choices)
+        def on_session_list_refresh():
+            sessions = _app.list_sessions()
+            if not sessions:
+                choices = [("暂无历史会话", "")]
+            else:
+                choices = [(f"{title}  {info}", sid) for sid, title, info in sessions]
+            return gr.update(choices=choices)
 
-    def on_session_select(session_id):
-        if session_id:
-            trace, hist = _app.switch_session(session_id)
-            return trace, hist
+        def on_session_select(session_id):
+            if session_id:
+                trace, hist = _app.switch_session(session_id)
+                return trace, hist
 
-    def on_new_session():
-        trace, hist = _app.new_session()
-        return trace, hist, on_session_list_refresh()
+        def on_new_session():
+            trace, hist = _app.new_session()
+            return trace, hist, on_session_list_refresh()
 
-    def on_send(user_text, history):
-        trace, new_hist = _app.send(user_text or "", history or [])
-        return trace, new_hist, ""
+        def on_send(user_text, history):
+            trace, new_hist = _app.send(user_text or "", history or [])
+            return trace, new_hist, ""
 
-    def on_clear():
-        _app.history = [{"role": "system", "content": SYSTEM_PROMPT}]
-        _app.trace("已清空对话")
-        return _app.trace_text(), []
+        def on_clear():
+            _app.history = [{"role": "system", "content": SYSTEM_PROMPT}]
+            _app.trace("已清空对话")
+            return _app.trace_text(), []
 
-    # 模式切换
-    mode_radio.change(on_mode_change, mode_radio, trace_output)
+        # 模式切换
+        mode_radio.change(on_mode_change, mode_radio, trace_output)
 
-    # 会话管理
-    btn_refresh_sessions.click(on_session_list_refresh, None, session_radio)
-    session_radio.select(on_session_select, session_radio, [trace_output, chatbot])
-    btn_new_session.click(on_new_session, None, [trace_output, chatbot, session_radio])
+        # 会话管理
+        btn_refresh_sessions.click(on_session_list_refresh, None, session_radio)
+        session_radio.select(on_session_select, session_radio, [trace_output, chatbot])
+        btn_new_session.click(on_new_session, None, [trace_output, chatbot, session_radio])
 
-    # 发送（按钮 + Enter）
-    btn_send.click(on_send, [msg_input, chatbot], [trace_output, chatbot, msg_input])
-    msg_input.submit(on_send, [msg_input, chatbot], [trace_output, chatbot, msg_input])
+        # 发送（按钮 + Enter）
+        btn_send.click(on_send, [msg_input, chatbot], [trace_output, chatbot, msg_input])
+        msg_input.submit(on_send, [msg_input, chatbot], [trace_output, chatbot, msg_input])
 
-    # 清空
-    btn_clear.click(on_clear, None, [trace_output, chatbot])
+        # 清空
+        btn_clear.click(on_clear, None, [trace_output, chatbot])
 
-    # 快捷示例
-    btn_example1.click(lambda: "北京天气怎么样？顺便算一下 123*456", None, msg_input)
-    btn_example2.click(lambda: "用 ReAct 模式解答：北京天气怎么样，如果好的话帮我推荐 3 本 Agent 好书", None, msg_input)
-    btn_example3.click(lambda: "用多 Agent 协作写一篇关于 AI Agent 的科普文章", None, msg_input)
-    btn_example4.click(lambda: "用 sql_query 查一下数据库里每个城市有多少用户", None, msg_input)
+        # 快捷示例
+        btn_example1.click(lambda: "北京天气怎么样？顺便算一下 123*456", None, msg_input)
+        btn_example2.click(lambda: "用 ReAct 模式解答：北京天气怎么样，如果好的话帮我推荐 3 本 Agent 好书", None, msg_input)
+        btn_example3.click(lambda: "用多 Agent 协作写一篇关于 AI Agent 的科普文章", None, msg_input)
+        btn_example4.click(lambda: "用 sql_query 查一下数据库里每个城市有多少用户", None, msg_input)
 
-    # 初始会话列表填充
-    demo.load(on_session_list_refresh, None, session_radio)
+        # 初始会话列表填充
+        demo.load(on_session_list_refresh, None, session_radio)
 
     return demo
 
@@ -511,7 +506,6 @@ def main():
         server_name=args.host,
         server_port=args.port,
         share=args.share,
-        show_api=False,
     )
 
 

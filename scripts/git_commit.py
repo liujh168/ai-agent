@@ -228,6 +228,8 @@ def main():
 
     # 6. 更新 refs/heads/main
     subprocess.run(["git", "update-ref", "refs/heads/main", new_commit_sha], check=True)
+    # 7. 同步索引，让 `git status` 显示干净（之前 git_commit.py 后总是需要手动 reset）
+    subprocess.run(["git", "read-tree", "HEAD"], check=True, capture_output=True)
 
     print(f"\n✅ 提交完成！")
     print(f"   {new_commit_sha[:12]} {args.message.split(chr(10))[0]}")
