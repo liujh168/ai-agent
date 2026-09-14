@@ -1,0 +1,17 @@
+# 本地 AI Agent 演示 — 依赖
+# LM Studio 本地运行时，请另行下载：https://lmstudio.ai/
+
+requests>=2.31.0
+openai>=1.40.0
+pypdf>=4.0.0
+pillow>=10.0.0
+
+# ---------- 可选 ----------
+# 未配置 BOCHA_API_KEY 时的 DuckDuckGo 降级（国内可能超时）
+# ddgs>=6.0.0
+
+# 自动加载 .env 文件中的 BOCHA_API_KEY / LM_STUDIO_BASE_URL
+python-dotenv>=1.0.1
+
+# 运行单元测试
+# pytest>=8.0.0
