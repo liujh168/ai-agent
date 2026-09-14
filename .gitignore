@@ -1,0 +1,30 @@
+# 虚拟环境
+.venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 运行时自动生成
+_rag_cache.pkl
+_test_chart.png
+
+# 日志 & 临时
+*.log
+*.tmp
+
+# 第三方大文件（PDF > 25MB 不入库；小 PDF 可按需加入 git）
+# *.pdf
+
+# 外部模型/数据
+*.bin
+*.safetensors
+
+# 环境变量密钥文件
+.env
+.env.local
+
+# IDE / 工具配置
+.vscode/
+.idea/
+.trae/
