@@ -23,6 +23,7 @@ except ImportError:
 from ai_agent.client import LMStudioClient
 from ai_agent.rag import RAGKnowledgeBase
 from ai_agent.persistence import ChatStore, DEFAULT_DB_PATH
+from ai_agent.multi_agent import run_multi_agent
 from ai_agent.tools import (
     run_code, get_weather, calculator, web_search,
     file_read, file_write, sql_query, run_terminal, human_confirm,
@@ -86,6 +87,7 @@ class AgentDemoApp:
         "- 用户要求【人工确认/确认一下/Human-in-the-loop】时，调用 human_confirm；\n"
         "- 用户要求【Few-shot/示例演示/Prompt Engineering/提示词工程/给我几个示例】时，调用 demo_few_shot；\n"
         "- 用户要求【压缩/摘要/总结对话/缩短历史】时，调用 summarize_history；\n"
+        "- 用户要求【多 Agent/多智能体/Planner/Executor/Critic/角色协作/分工协作】时，调用 run_multi_agent（Planner 拆任务 → Executor 执行 → Critic 评审）；\n"
         "- 执行敏感/破坏性操作前（删除覆盖文件、写入重要数据、SQL DDL/DML、终端写入命令），必须先调用 human_confirm 让用户确认；\n"
         "- run_terminal 内部有关键词安全拦截（Remove-Item/Set-Content/Stop-Computer 等 PowerShell 原生命令会被阻断），若被拦截请改用 human_confirm 或普通文件操作工具；\n"
         "- sql_query demo 模式只允许 SELECT/PRAGMA/EXPLAIN/WITH，DROP/DELETE/UPDATE 会被阻断；\n"
@@ -178,6 +180,14 @@ class AgentDemoApp:
                 "name": "extract_structured",
                 "description": "结构化输出：从文本中按指定字段提取数据，输出格式化 JSON。当用户要求提取结构化信息、抽取字段、生成 JSON 数据时调用",
                 "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "要提取信息的源文本"}, "fields": {"type": "string", "description": "逗号分隔的字段名，如：姓名,年龄,城市"}}, "required": ["text", "fields"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_multi_agent",
+                "description": "多 Agent 协作演示：Planner（规划）→ Executor（执行）→ Critic（评审）三角色分工协作。当用户提到多 Agent、多智能体、Planner-Executor-Critic、角色协作、分工协作时调用。适合复杂任务分解、多步骤产出、需要质量把关的场景",
+                "parameters": {"type": "object", "properties": {"task": {"type": "string", "description": "需要多 Agent 协作完成的复杂任务"}}, "required": ["task"]},
             },
         },
     ]
@@ -344,6 +354,9 @@ class AgentDemoApp:
         def extract_structured(text: str, fields: str) -> str:
             return self.client.structured_extract(text, fields)
 
+        def run_multi_agent_tool(task: str) -> str:
+            return run_multi_agent(self.client, task)
+
         # ---------- 注册闭包 ----------
         self.tool_map["demo_stream_chat"] = demo_stream_chat
         self.tool_map["demo_reasoning"] = demo_reasoning
@@ -356,6 +369,7 @@ class AgentDemoApp:
         self.tool_map["summarize_history"] = summarize_history
         self.tool_map["demo_few_shot"] = demo_few_shot
         self.tool_map["extract_structured"] = extract_structured
+        self.tool_map["run_multi_agent"] = run_multi_agent_tool
 
         log.info("工具注册完成，共 %d 个工具", len(self.tool_map))
 
@@ -364,7 +378,7 @@ class AgentDemoApp:
         print()
         print("╔═══════════════════════════════════════════════╗")
         print("║   🤖 本地 AI Agent 交互式演示                 ║")
-        print("║   基于 LM Studio · 19 种能力 · 自然语言路由     ║")
+        print("║   基于 LM Studio · 20 种能力 · 自然语言路由     ║")
         print("╚═══════════════════════════════════════════════╝")
         print("  可用示例：")
         print("  - 介绍一下你自己")
@@ -379,6 +393,7 @@ class AgentDemoApp:
         print("  - 帮我规划并写一篇关于 AI Agent 的科普文章")
         print("  - 思维链解答：一个人花8元买鸡，9元卖出，10元买回，11元卖出，赚了多少")
         print("  - 用 ReAct 模式解答：北京现在天气怎么样，天气好的话帮我推荐几本 Agent 好书")
+        print("  - 用多 Agent 协作写一篇关于「AI Agent」的科普文章（Planner+Executor+Critic）")
         print("  - exit / quit / 退出  结束程序")
         print()
 
