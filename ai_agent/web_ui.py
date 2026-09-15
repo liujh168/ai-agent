@@ -528,10 +528,12 @@ def main():
     print()
 
     demo = build_ui()
+
     demo.launch(
         server_name=args.host,
         server_port=args.port,
         share=args.share,
+        inbrowser=False,
     )
 
 
