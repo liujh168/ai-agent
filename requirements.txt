@@ -9,8 +9,14 @@ pillow~=10.0.0
 # 自动加载 .env 文件中的 BOCHA_API_KEY / LM_STUDIO_BASE_URL
 python-dotenv~=1.0.1
 
-# Web UI（Gradio）
-gradio~=4.0.0
+# Web UI（Gradio）—— 已锁定一套互相兼容的现代版本组合
+# 说明：gradio 4.44.1 需搭配旧版 fastapi/starlette/pydantic/huggingface_hub，
+#       否则在 Python 3.12 下会因版本脱节报错（详见 distutils / HfFolder / schema 兼容问题）
+gradio==4.44.1
+fastapi==0.115.6
+starlette==0.41.3
+pydantic==2.9.2
+huggingface-hub==0.26.2
 
 # ---------- 可选 ----------
 # 未配置 BOCHA_API_KEY 时的 DuckDuckGo 降级（国内可能超时）
