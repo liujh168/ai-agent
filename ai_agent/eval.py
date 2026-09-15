@@ -195,13 +195,13 @@ EVAL_CASES: list[EvalCase] = [
         description="多模态：模型应路由到 demo_vision 并返回图片中 'RAG' 最高",
     ),
 
-    # ---------- Banner 示例 9：Planner-Executor 任务规划（慢） ----------
+    # ---------- Banner 示例 9：Planner-Executor 任务规划 ----------
     EvalCase(
         name="banner_plan_task",
         capability="slow_integration",
         prompt="帮我规划一下写一篇关于 AI Agent 的科普文章，分成几个步骤",
         expected_tool="plan_task",
-        description="Planner-Executor 任务规划，子任务应完整列出来。慢用例，--tag 可过滤",
+        description="Planner-Executor 任务规划，子任务应完整列出来",
     ),
 
     # ---------- Banner 示例 10：思维链推理 CoT ----------
@@ -223,13 +223,13 @@ EVAL_CASES: list[EvalCase] = [
         description="ReAct 多步：先 get_weather，再 recommend_book，展示 Thought/Action/Observation",
     ),
 
-    # ---------- Banner 示例 12：多 Agent 协作（极慢） ----------
+    # ---------- Banner 示例 12：多 Agent 协作 ----------
     EvalCase(
         name="banner_multi_agent",
         capability="slow_integration",
         prompt="让 Planner、Executor、Critic 三个 Agent 协作：写一份关于 AI Agent 的简介",
         expected_tool="run_multi_agent",
-        description="多 Agent 协作：Planner 规划 → Executor 写文 → Critic 评审。极慢用例（~45min），--tag 过滤",
+        description="多 Agent 协作：Planner 规划 → Executor 写文 → Critic 评审",
     ),
 
     # ---------- Banner 示例 13：流式对话 ----------

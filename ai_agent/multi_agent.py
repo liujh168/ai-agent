@@ -124,7 +124,7 @@ def _parse_subtasks(plan_text: str) -> list[str]:
 def run_multi_agent(
     client,  # LMStudioClient 实例
     user_task: str,
-    max_rounds: int = 3,
+    max_rounds: int = 2,
     temperature: float = 0.7,
     max_tokens: int = 2048,
     trace_callback=None,  # 可选：每行 print 文本会传给这个 callback
@@ -159,7 +159,7 @@ def run_multi_agent(
         {"role": "system", "content": ROLE_PROMPTS["planner"]},
         {"role": "user", "content": f"请为下面的任务制定执行计划：\n\n{user_task}"},
     ]
-    plan_text = client.chat(planner_msgs, temperature=temperature, max_tokens=max_tokens)
+    plan_text = client.chat(planner_msgs, temperature=temperature, max_tokens=512)
     _emit(f"\n📊 Planner 输出:\n{plan_text}")
 
     subtasks = _parse_subtasks(plan_text)
@@ -184,7 +184,7 @@ def run_multi_agent(
                 + "\n\n请给出评审结论。"
             )},
         ]
-        critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=max_tokens)
+        critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=512)
         _emit(f"\n📝 Critic 评审:\n{critic_reply}")
 
         if _parse_critic_decision(critic_reply):
@@ -201,7 +201,7 @@ def run_multi_agent(
                 "请根据以上批评意见重新规划，输出完整的新计划。"
             )},
         ]
-        plan_text = client.chat(planner_msgs, temperature=temperature, max_tokens=max_tokens)
+        plan_text = client.chat(planner_msgs, temperature=temperature, max_tokens=512)
         subtasks = _parse_subtasks(plan_text) or [plan_text.strip()]
         _emit(f"\n📊 Planner 重新输出:\n{plan_text}")
         _emit(f"\n🔍 新解析到 {len(subtasks)} 个子任务")
@@ -240,7 +240,7 @@ def run_multi_agent(
                     "请给出评审结论。"
                 )},
             ]
-            critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=max_tokens)
+            critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=512)
             _emit(f"   Critic: {critic_reply[:200]}{'…' if len(critic_reply) > 200 else ''}")
 
             if _parse_critic_decision(critic_reply):
@@ -263,6 +263,13 @@ def run_multi_agent(
 
         all_outputs.append((i, subtask, exec_output))
         accumulated_context += f"\n\n【子任务 {i} 完成】{subtask}\n{exec_output}"
+        # 截断：后序子任务只需看最近 800 字 + 开头 400 字的原始任务/计划摘要
+        if len(accumulated_context) > 1200:
+            accumulated_context = (
+                accumulated_context[:400]
+                + "\n…（前序产出已截断，保留最近内容）…\n"
+                + accumulated_context[-800:]
+            )
 
     # ---------- Phase 4: 汇总 ----------
     _emit(f"\n{separator}")

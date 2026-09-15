@@ -30,7 +30,8 @@ class LMStudioClient:
         self.api_key = api_key
         self.model = os.environ.get("LM_STUDIO_MODEL", model)
         self.client = OpenAI(base_url=self.base_url, api_key=api_key)
-        self._model_checked = False  # 只在首次调用时打印状态
+        self._model_checked = False      # 只在首次调用时打印状态
+        self._model_cached_name = None   # 首次 ensure_model_loaded 成功后缓存，跳过后续 HTTP 检查
 
     def check_server_status(self) -> dict:
         """检测 LM Studio 服务是否运行，以及模型是否已加载"""
@@ -60,7 +61,9 @@ class LMStudioClient:
         return result
 
     def ensure_model_loaded(self) -> str:
-        """确保模型已加载，未加载则抛出异常（只首次打印状态）"""
+        """确保模型已加载，未加载则抛出异常。成功后缓存结果，后续调用直接返回省掉 HTTP 健康检查。"""
+        if self._model_cached_name is not None:
+            return self._model_cached_name
         status = self.check_server_status()
         if not status["server_running"]:
             raise RuntimeError(status["error"])
@@ -72,6 +75,7 @@ class LMStudioClient:
             target = f" → {self.model}" if self.model != "auto" else " (auto)"
             log.info("服务运行中，已加载模型: %s%s", status["model_name"], target)
             self._model_checked = True
+        self._model_cached_name = status["model_name"]
         return status["model_name"]
 
     def summarize_messages(self, messages: list[dict], keep_recent: int = 4) -> list[dict]:
@@ -396,7 +400,7 @@ class LMStudioClient:
         )
         return response.choices[0].message.content
 
-    def plan_and_execute(self, task: str, max_subtasks: int = 4, temperature: float = 0.7, max_tokens: int = 2048) -> str:
+    def plan_and_execute(self, task: str, max_subtasks: int = 3, temperature: float = 0.7, max_tokens: int = 2048) -> str:
         """任务规划分解（Planner-Executor）：先规划后执行，逐个子任务完成"""
         self.ensure_model_loaded()
         plan_prompt = (
