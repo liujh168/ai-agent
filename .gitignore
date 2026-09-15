@@ -10,6 +10,8 @@ _rag_cache.pkl
 _test_chart.png
 ai_agent_history.db
 *.db-journal
+demo.db
+poem.txt
 
 # 日志 & 临时
 *.log

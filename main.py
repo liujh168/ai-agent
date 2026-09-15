@@ -126,7 +126,7 @@ class AgentDemoApp:
                 draw.rectangle([x, 400 - h, x + 120, 400], fill="steelblue")
                 draw.text((x + 20, 400 - h - 25), label, fill="black")
                 x += 140
-            draw.text((20, 20), "2026 年 AI 领域关注度调查", fill="black")
+            draw.text((20, 20), "2026 AI Field Attention Survey", fill="black")
             img.save(self.TEST_IMAGE)
             print(f"[OK] 已生成测试图片 {self.TEST_IMAGE} 供图像识别演示")
         except Exception as e:
