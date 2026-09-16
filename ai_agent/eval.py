@@ -433,6 +433,137 @@ class Evaluator:
             for r in failures:
                 print(f"    - {r.case.name}: {r.reason}")
 
+    # ---------- 数据提取（给 HTML 报告用）----------
+
+    def build_report_data(self, results: list[EvalResult]) -> dict:
+        """从评测结果提取结构化数据，供 console / HTML 报告共用"""
+        total = len(results)
+        passed = sum(1 for r in results if r.passed)
+        failed = total - passed
+
+        capability_stats: dict[str, tuple[int, int]] = {}
+        for r in results:
+            cap = r.case.capability
+            prev = capability_stats.get(cap, (0, 0))
+            capability_stats[cap] = (prev[0] + 1, prev[1] + (1 if r.passed else 0))
+
+        failures = [r for r in results if not r.passed]
+
+        return {
+            "total": total,
+            "passed": passed,
+            "failed": failed,
+            "pass_rate": passed / total if total else 0,
+            "capability_stats": capability_stats,
+            "failures": failures,
+            "all_results": results,
+        }
+
+    # ---------- HTML 报告 ----------
+
+    def _generate_html_report(self, results: list[EvalResult], path: str) -> None:
+        """生成 HTML 评测报告"""
+        import html as _html
+
+        data = self.build_report_data(results)
+        total = data["total"]
+        passed = data["passed"]
+        pass_rate_pct = data["pass_rate"] * 100
+
+        # 能力维度柱状图 HTML
+        cap_bars = ""
+        for cap, (t, p) in sorted(data["capability_stats"].items()):
+            ratio = p / t if t else 0
+            pct = ratio * 100
+            color = "#4caf50" if ratio >= 0.8 else ("#ff9800" if ratio >= 0.5 else "#f44336")
+            cap_bars += f"""
+            <div class="cap-row">
+                <span class="cap-name">{_html.escape(cap)}</span>
+                <div class="bar-bg"><div class="bar-fill" style="width:{pct:.1f}%;background:{color}"></div></div>
+                <span class="cap-num">{p}/{t}</span>
+                <span class="cap-pct">{pct:.0f}%</span>
+            </div>"""
+
+        # 用例列表
+        case_rows = ""
+        for r in data["all_results"]:
+            status = "✅" if r.passed else "❌"
+            row_cls = "pass" if r.passed else "fail"
+            tools_str = ", ".join(r.tools_called) if r.tools_called else "-"
+            case_rows += f"""
+            <tr class="{row_cls}">
+                <td>{status} {_html.escape(r.case.name)}</td>
+                <td><code>{_html.escape(r.case.capability)}</code></td>
+                <td>{_html.escape(tools_str)}</td>
+                <td>{r.elapsed:.1f}s</td>
+                <td>{_html.escape(r.reason)}</td>
+            </tr>"""
+
+        html_doc = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>🤖 AI Agent 评测报告</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; margin: 0; padding: 32px; color: #222; }}
+  h1 {{ margin: 0 0 8px; }}
+  .subtitle {{ color: #666; margin-bottom: 28px; }}
+  .cards {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }}
+  .card {{ background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
+  .card-label {{ color: #888; font-size: 13px; margin-bottom: 6px; }}
+  .card-value {{ font-size: 32px; font-weight: 700; }}
+  .card.total .card-value {{ color: #1976d2; }}
+  .card.passed .card-value {{ color: #4caf50; }}
+  .card.failed .card-value {{ color: #f44336; }}
+  .card.rate .card-value {{ color: #ff9800; }}
+  h2 {{ margin-top: 32px; margin-bottom: 16px; }}
+  .cap-row {{ display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }}
+  .cap-name {{ width: 120px; font-size: 14px; }}
+  .bar-bg {{ flex: 1; height: 18px; background: #e0e0e0; border-radius: 9px; overflow: hidden; }}
+  .bar-fill {{ height: 100%; border-radius: 9px; transition: width 0.3s; }}
+  .cap-num {{ width: 60px; text-align: right; font-family: monospace; }}
+  .cap-pct {{ width: 50px; text-align: right; color: #666; }}
+  table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
+  th, td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }}
+  th {{ background: #fafafa; color: #555; font-weight: 600; }}
+  tr.pass td {{ }}
+  tr.fail td {{ background: #fff5f5; }}
+  code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-size: 12px; }}
+  .summary-bar {{ height: 24px; background: #e0e0e0; border-radius: 12px; overflow: hidden; margin-bottom: 24px; }}
+  .summary-fill {{ height: 100%; background: linear-gradient(90deg, #4caf50, #66bb6a); border-radius: 12px; }}
+</style>
+</head>
+<body>
+<h1>🤖 AI Agent 评测报告</h1>
+<p class="subtitle">共 {total} 条用例 · 生成于 {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+
+<div class="summary-bar"><div class="summary-fill" style="width:{pass_rate_pct:.1f}%"></div></div>
+
+<div class="cards">
+  <div class="card total"><div class="card-label">总用例</div><div class="card-value">{total}</div></div>
+  <div class="card passed"><div class="card-label">通过</div><div class="card-value">{passed}</div></div>
+  <div class="card failed"><div class="card-label">失败</div><div class="card-value">{data['failed']}</div></div>
+  <div class="card rate"><div class="card-label">通过率</div><div class="card-value">{pass_rate_pct:.1f}%</div></div>
+</div>
+
+<h2>🎯 能力维度</h2>
+{cap_bars}
+
+<h2>📋 用例详情</h2>
+<table>
+<thead><tr><th>用例</th><th>能力</th><th>工具调用</th><th>耗时</th><th>结果</th></tr></thead>
+<tbody>
+{case_rows}
+</tbody>
+</table>
+</body>
+</html>"""
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html_doc)
+        print(f"📄 HTML 报告已生成: {path}")
+
 
 # ============================================================
 # CLI 入口
@@ -443,6 +574,8 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="列出所有评测用例，不执行")
     parser.add_argument("--tag", type=str, default=None, help="只运行指定 capability 标签的用例")
     parser.add_argument("--no-rag", action="store_true", help="跳过 RAG 知识库构建（评测无需 RAG 时加快启动）")
+    parser.add_argument("--html-report", type=str, default=None,
+                        help="生成 HTML 评测报告到指定路径（如 eval_report.html）")
     args = parser.parse_args()
 
     if args.list:
@@ -527,6 +660,10 @@ def main() -> None:
         max_iterations=5,
     )
     results = evaluator.run(tag=args.tag)
+
+    # HTML 报告
+    if args.html_report:
+        evaluator._generate_html_report(results, args.html_report)
 
     # 返回码：有失败则非零
     failed = sum(1 for r in results if not r.passed)
