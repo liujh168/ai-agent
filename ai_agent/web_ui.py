@@ -59,6 +59,7 @@ from ai_agent.app_core import (
     TOOL_COUNT,
     build_tool_map,
     clean_react_tool_map,
+    get_tool_schemas,
 )
 
 try:
@@ -104,10 +105,14 @@ class AgentApp:
     # ---------- 工具注册 ----------
 
     def _register_tools(self) -> None:
+        # 初始化 MCP 远端工具（可选，不配置则跳过）
+        self.mcp_manager = self._init_mcp()
+
         self.tool_map = build_tool_map(
             self.client, lambda: self.rag, self.test_image,
             get_history=lambda: self.history,
             set_history=lambda h: setattr(self, "history", h),
+            mcp_manager=self.mcp_manager,
         )
         # Web 模式不支持终端交互式人工确认 → 替换为安全提示，避免 input() 卡死 Gradio 线程
         self.tool_map["human_confirm"] = self._web_human_confirm
@@ -115,6 +120,24 @@ class AgentApp:
         if self.disable_dangerous:
             for name in ("demo_code_run", "run_terminal"):
                 self.tool_map.pop(name, None)
+
+    def _init_mcp(self):
+        """安全初始化 MCPManager：无配置返回 None，连接失败也不崩"""
+        try:
+            from ai_agent.mcp_client import create_mcp_manager
+            servers = self.cfg.mcp_servers
+            if not servers:
+                return None
+            mgr = create_mcp_manager(list(servers))
+            return mgr  # 即使连接失败（total_tools=0）也返回，UI 显示状态
+        except Exception as e:
+            print(f"  ⚠️ MCP 初始化失败: {e}")
+            return None
+
+    def _is_mcp_tool(self, name: str) -> bool:
+        """判断工具名是否来自 MCP 远端（trace 颜色区分用）"""
+        return (self.mcp_manager is not None
+                and self.mcp_manager.is_mcp_tool(name))
 
     def _web_human_confirm(self, action: str) -> str:
         """Web 模式下的安全替代：不阻塞 Gradio 线程，仅给出提示"""
@@ -253,21 +276,29 @@ class AgentApp:
         # 创建一个带 hook 的 tool_map，拦截调用展示
         hooked_map = {}
         for name, func in self.tool_map.items():
+            # 跳过非 tool_map 条目（如 human_confirm 的 Web 版本）
             def make_hook(n, fn):
                 def hook(**kwargs):
                     call_str = f"🔧 [{n}] " + ", ".join(f"{k}={v}" for k, v in kwargs.items())
-                    self.trace(call_str, kind="tool_call")
+                    # 区分本地 vs MCP 工具
+                    if self._is_mcp_tool(n):
+                        self.trace(call_str + "  ← MCP 远端", kind="tool_call_mcp")
+                    else:
+                        self.trace(call_str, kind="tool_call")
                     t0 = time.time()
                     result = fn(**kwargs)
                     dt = time.time() - t0
                     preview = str(result)[:150]
                     self.trace(f"  ↳ 结果 ({dt*1000:.0f}ms): {preview}{'…' if len(str(result)) > 150 else ''}", kind="tool_result")
                     return result
+                hook.__name__ = n
                 return hook
             hooked_map[name] = make_hook(name, func)
 
+        # 合成完整 tool schemas（本地 + MCP 远端），高危工具过滤
+        all_schemas = get_tool_schemas(self.mcp_manager)
         tools = [
-            s for s in TOOL_SCHEMAS
+            s for s in all_schemas
             if not (self.disable_dangerous and s["function"]["name"] in ("demo_code_run", "run_terminal"))
         ]
 
@@ -343,6 +374,7 @@ class AgentApp:
         _KIND_COLORS = {
             "info":        "#888888",
             "tool_call":   "#1a73e8",
+            "tool_call_mcp": "#7b1fa2",   # 紫色 - MCP 远端工具
             "tool_result": "#2e7d32",
             "thought":     "#9c27b0",
             "action":      "#ff6f00",
@@ -446,9 +478,16 @@ def build_ui() -> gr.Blocks:
         title="AI Agent 学习演示 · Web UI",
         css=_CSS,
     ) as demo:
+        # 动态计算工具总数（本地 + 可选 MCP 远端）
+        _mgr = _app.mcp_manager
+        _mcp_count = _mgr.total_tools if _mgr else 0
+        _total = TOOL_COUNT + _mcp_count
+        _mcp_note = f" · 🔌 MCP 远端 {_mcp_count}" if _mcp_count > 0 else ""
+
         gr.Markdown(
             "# 🤖 AI Agent 学习演示 · Web UI\n"
-            f"基于 LM Studio 本地大模型 · {TOOL_COUNT} 种能力 · 自然语言路由\n"
+            f"基于 LM Studio 本地大模型 · {_total} 种能力"
+            f"{_mcp_note} · 自然语言路由\n"
             "对话自动持久化到 SQLite，支持多会话恢复"
         )
 

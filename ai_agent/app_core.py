@@ -312,7 +312,16 @@ TOOL_SCHEMAS = [
 
 
 # 实际注册的工具数量（自动同步，banner / Web 标题 / README 都引用它，避免文案漂移）
+# 注意：这是**本地工具**数量。MCP 远端工具在运行时通过 build_tool_map(mcp_manager=...) 追加
 TOOL_COUNT = len(TOOL_SCHEMAS)
+
+
+def get_tool_schemas(mcp_manager=None) -> list[dict]:
+    """运行时合成最终的 TOOL_SCHEMAS（本地 + 可选 MCP 远端）"""
+    schemas = list(TOOL_SCHEMAS)
+    if mcp_manager is not None and mcp_manager.total_tools > 0:
+        schemas.extend(mcp_manager.tool_schemas)
+    return schemas
 
 
 # ============================================================
@@ -337,12 +346,14 @@ def clean_react_tool_map(tool_map: dict) -> dict:
 
 
 def build_tool_map(client, get_rag, test_image: str = "_test_chart.png",
-                  get_history=None, set_history=None) -> dict:
+                  get_history=None, set_history=None,
+                  mcp_manager=None) -> dict:
     """
     构建完整的工具映射（函数名 → 可调用对象）。
     get_rag: 无参可调用，返回 RAGKnowledgeBase 实例或 None（支持 Web 端延迟加载）。
     test_image: demo_vision 的默认测试图片路径。
     get_history / set_history: 可选，传入后一并注册 summarize_history（需读写 App 的 history）。
+    mcp_manager: 可选 MCPManager，传入后自动追加远端 MCP 工具。
     """
     tool_map: dict = {}
 
@@ -442,6 +453,11 @@ def build_tool_map(client, get_rag, test_image: str = "_test_chart.png",
         tool_map["summarize_history"] = make_summarize_history(
             client, get_history, set_history
         )
+
+    # ---------- 3. MCP 远端工具（可选，追加在本地工具之后）----------
+    if mcp_manager is not None:
+        mcp_callables = mcp_manager.make_callables()
+        tool_map.update(mcp_callables)
 
     return tool_map
 

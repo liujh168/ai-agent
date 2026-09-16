@@ -22,9 +22,14 @@ class Config:
     chunk_size: int = 500
     chunk_overlap: int = 50
     rag_cache_file: str = "_rag_cache.pkl"
+    # MCP 服务器 URL 列表（可选）。多个用分号分隔，例如:
+    #   MCP_SERVERS=https://mcp.example.com/tools;http://localhost:9000/sse
+    mcp_servers: tuple = ()
 
     @classmethod
     def from_env(cls) -> "Config":
+        raw_mcp = os.environ.get("MCP_SERVERS", "").strip()
+        servers = tuple(s.strip() for s in raw_mcp.split(";") if s.strip()) if raw_mcp else ()
         return cls(
             base_url=os.environ.get("LM_STUDIO_BASE_URL", cls.base_url),
             api_key=os.environ.get("LM_STUDIO_API_KEY", cls.api_key),
@@ -33,4 +38,5 @@ class Config:
             chunk_size=int(os.environ.get("RAG_CHUNK_SIZE", cls.chunk_size)),
             chunk_overlap=int(os.environ.get("RAG_CHUNK_OVERLAP", cls.chunk_overlap)),
             rag_cache_file=os.environ.get("RAG_CACHE_FILE", cls.rag_cache_file),
+            mcp_servers=servers,
         )
