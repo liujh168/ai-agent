@@ -25,8 +25,10 @@ from ai_agent.multi_agent import run_multi_agent
 # ============================================================
 # 系统提示词（自然语言 → 工具路由的"真相源"）
 # ============================================================
+# BASE_SYSTEM_PROMPT: 原始静态版本，不包含任何 Skill 信息
+# build_system_prompt(): 运行时合成完整版本（base + Skill 列表简述）
 
-SYSTEM_PROMPT = (
+BASE_SYSTEM_PROMPT = (
     "你是一个交互式演示助手，负责向用户展示 LLM 的各项能力。"
     "根据用户的自然语言请求，选择合适的工具来完成演示：\n"
     "- 用户要求【流式输出/逐字输出/边打字边回复】时，调用 demo_stream_chat；\n"
@@ -57,6 +59,28 @@ SYSTEM_PROMPT = (
     "- 用户要求【计算】时，调用 calculator；\n"
     "- 普通聊天直接回答，不需要调用工具。"
 )
+
+# 向后兼容别名：旧代码引用 SYSTEM_PROMPT 时行为不变（没有 Skill 增强）
+SYSTEM_PROMPT = BASE_SYSTEM_PROMPT
+
+
+def build_system_prompt(skill_registry=None) -> str:
+    """
+    运行时合成完整 system prompt：BASE_SYSTEM_PROMPT + 已加载 Skill 的简述列表。
+    Skill 的详细 instructions 只在 Skill 激活时才注入（chat_with_skill 内部处理），
+    这里只列出名字和简述，节省 token。
+    skill_registry: SkillRegistry 实例，None 或空则返回纯 BASE_SYSTEM_PROMPT。
+    """
+    prompt = BASE_SYSTEM_PROMPT
+    if skill_registry is not None and skill_registry.count > 0:
+        skill_section = "\n\n## 可用的专业能力（Skills）\n\n"
+        skill_section += "下面这些是预定义的复合工作流（多步编排 + 专属 Prompt），"
+        skill_section += "当用户请求匹配时会自动激活。\n\n"
+        for s in skill_registry.list():
+            kws = ", ".join(s.trigger_keywords[:3])
+            skill_section += f"- 【{s.name}】{s.description}（关键词: {kws}）\n"
+        prompt += skill_section
+    return prompt
 
 
 # ============================================================

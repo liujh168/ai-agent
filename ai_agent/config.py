@@ -25,6 +25,9 @@ class Config:
     # MCP 服务器 URL 列表（可选）。多个用分号分隔，例如:
     #   MCP_SERVERS=https://mcp.example.com/tools;http://localhost:9000/sse
     mcp_servers: tuple = ()
+    # Skill 定义文件目录（可选）。空字符串或目录不存在则跳过 Skill 加载。
+    # 支持声明式 Markdown 文件作为复合工作流（Skill = 场景化 Prompt + 工具子集）。
+    skill_dir: str = "skills"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -39,4 +42,5 @@ class Config:
             chunk_overlap=int(os.environ.get("RAG_CHUNK_OVERLAP", cls.chunk_overlap)),
             rag_cache_file=os.environ.get("RAG_CACHE_FILE", cls.rag_cache_file),
             mcp_servers=servers,
+            skill_dir=os.environ.get("SKILL_DIR", cls.skill_dir),
         )

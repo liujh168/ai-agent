@@ -29,6 +29,7 @@ from ai_agent.app_core import (
     TOOL_SCHEMAS,
     TOOL_COUNT,
     build_tool_map,
+    build_system_prompt,
 )
 
 import os
@@ -73,6 +74,7 @@ class AgentDemoApp:
         self.client = LMStudioClient(self.cfg.base_url, self.cfg.api_key, self.cfg.model)
         self.rag: RAGKnowledgeBase | None = None
         self.tool_map: dict = {}
+        self.skill_registry = None  # 可选 SkillRegistry（运行时扫描 skills/ 目录）
         self.history: list[dict] = []
         # ---------- 对话持久化 ----------
         self.store = ChatStore(db_path)
@@ -141,6 +143,24 @@ class AgentDemoApp:
         )
         log.info("工具注册完成，共 %d 个工具", len(self.tool_map))
 
+    def _register_skills(self) -> None:
+        """加载声明式 Skill（可选，skills/ 目录不存在则跳过）"""
+        skill_dir = self.cfg.skill_dir
+        if not skill_dir:
+            return
+        # 解析为相对 main.py 所在目录的绝对路径
+        abs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), skill_dir)
+        if not os.path.isdir(abs_dir):
+            log.info("Skill 目录不存在（%s），跳过 Skill 加载", abs_dir)
+            return
+        try:
+            from ai_agent.skill import SkillRegistry
+            available = list(self.tool_map.keys())
+            self.skill_registry = SkillRegistry(abs_dir, available)
+        except Exception as e:
+            log.warning("SkillRegistry 初始化失败: %s", e)
+            self.skill_registry = None
+
     def _print_banner(self) -> None:
         """打印启动 banner 与示例"""
         print()
@@ -171,9 +191,11 @@ class AgentDemoApp:
         self._build_knowledge_base()
         self._create_test_image()
         self._register_tools()
+        self._register_skills()   # ← 新增：加载声明式 Skill（可选）
         self._print_banner()
 
-        self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
+        # 用动态 system prompt（包含 Skill 列表简述）
+        self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}]
 
         # ---------- 会话管理 ----------
         self._handle_session_select()
@@ -215,6 +237,7 @@ class AgentDemoApp:
                     messages=self.history,
                     tools=self.TOOLS,
                     tool_map=self.tool_map,
+                    skill_registry=self.skill_registry,  # ← 新增：让 Skill 路由生效
                 )
                 dt = time.time() - t0
                 print(reply)
@@ -270,7 +293,7 @@ class AgentDemoApp:
                         print(f"\n✅ 已恢复会话「{sessions[idx].title}」"
                               f"（{len(saved)} 条历史消息）")
                         # 恢复时把 system prompt + 历史消息拼回去
-                        self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}] + saved
+                        self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}] + saved
                         self.session_id = sid
                         return
                 except ValueError:
@@ -335,7 +358,7 @@ class AgentDemoApp:
                     sid = sessions[idx].id
                     saved = self.store.load_messages(sid)
                     print(f"  ✅ 已加载「{sessions[idx].title}」（{len(saved)} 条消息）")
-                    self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}] + saved
+                    self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}] + saved
                     self.session_id = sid
                     return ""
             except ValueError:
@@ -345,7 +368,7 @@ class AgentDemoApp:
         elif cmd == "/new":
             sid = self.store.create_session(title="新会话", mode="chat")
             self.session_id = sid
-            self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
+            self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}]
             print(f"  ✨ 已创建新会话（ID: {sid}）")
             return ""
         elif cmd == "/save":
@@ -377,7 +400,7 @@ class AgentDemoApp:
                         self.store.delete_session(sid)
                         if sid == self.session_id:
                             self.session_id = None
-                            self.history = [{"role": "system", "content": self.SYSTEM_PROMPT}]
+                            self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}]
                         print(f"  🗑️ 已删除")
                     else:
                         print("  已取消")

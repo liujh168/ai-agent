@@ -142,9 +142,27 @@ class LMStudioClient:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         max_iterations: int = 5,
+        skill_registry=None,
+        mcp_manager=None,
     ):
         """Tool Calling 循环：自主选择工具 → 执行 → 把结果喂回模型，直到模型返回最终文本"""
         self.ensure_model_loaded()
+
+        # ---------- Skill 路由：关键词匹配命中 Skill → 跳到 Skill 执行 ----------
+        if skill_registry is not None:
+            last_user = next(
+                (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
+            )
+            if last_user:
+                matched = skill_registry.match(last_user)
+                if matched is not None:
+                    log.info("[Skill 激活] %s（来自 chat_with_tools 路由）", matched.name)
+                    return self.chat_with_skill(
+                        messages, matched, tool_map,
+                        temperature=temperature, max_tokens=max_tokens,
+                        mcp_manager=mcp_manager,
+                    )
+        # ---------- 下面是原有逻辑，一行都不用改 ----------
         history = list(messages)
 
         for _ in range(max_iterations):
@@ -184,6 +202,107 @@ class LMStudioClient:
                     history.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
 
         return "已达到最大工具调用迭代次数。"
+
+    # ============================================================
+    # Skill 执行 — 场景化 System Prompt + 工具子集过滤 + 多轮循环
+    # ============================================================
+
+    def chat_with_skill(
+        self,
+        messages: list[dict],
+        skill,           # SkillDef 实例（避免循环导入，不传具体类型）
+        tool_map: dict,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        mcp_manager=None,
+    ) -> str:
+        """
+        Skill 执行循环：
+        1. 把 Skill 的 instructions 注入为场景化 system prompt（替换默认 system）
+        2. 过滤 tool_map 只保留 Skill 声明的 required_tools
+        3. 复用 chat_with_tools 的 Function Calling 循环逻辑，最多跑 skill.max_rounds 轮
+        """
+        from ai_agent.app_core import get_tool_schemas
+
+        self.ensure_model_loaded()
+
+        # ---------- 1. 构造 Skill 专属 history：用 Skill instructions 替换 system prompt ----------
+        other_msgs = []
+        has_system = False
+        for m in messages:
+            if m["role"] == "system" and not has_system:
+                other_msgs.append({"role": "system", "content": skill.instructions})
+                has_system = True
+            else:
+                other_msgs.append(m)
+        if not has_system:
+            other_msgs.insert(0, {"role": "system", "content": skill.instructions})
+
+        history = list(other_msgs)
+
+        # ---------- 2. 过滤 tool_map 和对应 schema ----------
+        required = set(skill.required_tools)
+        if required:
+            filtered_map = {name: fn for name, fn in tool_map.items() if name in required}
+        else:
+            filtered_map = dict(tool_map)
+
+        # 生成过滤后的 tool schemas（包含 MCP 远端工具如果有 mcp_manager）
+        all_schemas = get_tool_schemas(mcp_manager)
+        filtered_schemas = [
+            s for s in all_schemas
+            if s["function"]["name"] in filtered_map
+        ]
+
+        log.info("chat_with_skill: %s, 可用工具=%d/%d, max_rounds=%d",
+                 skill.name, len(filtered_map), len(tool_map), skill.max_rounds)
+
+        # ---------- 3. 多轮 Function Calling 循环（复用 chat_with_tools 的逻辑） ----------
+        for _ in range(skill.max_rounds):
+            response = self.client.chat.completions.create(
+                model=self.model, messages=history, tools=filtered_schemas,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+            choice = response.choices[0]
+
+            if choice.finish_reason == "stop":
+                return choice.message.content
+
+            if choice.finish_reason == "tool_calls":
+                tool_calls = choice.message.tool_calls
+                history.append(choice.message.model_dump())
+
+                for tool_call in tool_calls:
+                    func_name = tool_call.function.name
+                    func_args = tool_call.function.arguments
+                    print(f"[Skill:{skill.name}] 调用工具: {func_name}({func_args})")
+                    t0 = time.time()
+
+                    if func_name in filtered_map:
+                        try:
+                            args = json.loads(func_args)
+                        except json.JSONDecodeError:
+                            result = f"错误：无法解析参数 JSON，工具 '{func_name}' 需要的参数被模型输出异常。"
+                            history.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+                            continue
+                        try:
+                            result = str(filtered_map[func_name](**args))
+                        except Exception as e:
+                            result = f"工具执行异常: {type(e).__name__}: {e}"
+                    else:
+                        result = f"错误: 未知工具 {func_name}（Skill {skill.name} 只允许: {', '.join(filtered_map.keys())}）"
+
+                    dt = time.time() - t0
+                    preview = result[:200] + ("..." if len(result) > 200 else "")
+                    print(f"[Skill:{skill.name}] 结果 ({dt*1000:.0f}ms): {preview}")
+                    log.info("skill %s tool %s completed in %.0fms", skill.name, func_name, dt * 1000)
+                    history.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+
+        # max_rounds 到了，返回最后一条助手消息或最后一条内容
+        for m in reversed(history):
+            if m["role"] == "assistant" and m.get("content"):
+                return m["content"]
+        return f"已达 Skill {skill.name} 最大执行轮次 ({skill.max_rounds})，未得到最终答案。"
 
     # ============================================================
     # ReAct — Reasoning + Acting（文本式推理轨迹可见）

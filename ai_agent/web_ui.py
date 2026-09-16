@@ -1,4 +1,4 @@
-﻿"""
+"""
 AI Agent 学习演示 — Gradio Web UI
 ==================================
 与 CLI (main.py) 等价的 Web 演示界面。
@@ -60,6 +60,7 @@ from ai_agent.app_core import (
     build_tool_map,
     clean_react_tool_map,
     get_tool_schemas,
+    build_system_prompt,
 )
 
 try:
@@ -86,7 +87,8 @@ class AgentApp:
         self.rag: RAGKnowledgeBase | None = None
         self.store = ChatStore(db_path)
         self.session_id: str | None = None
-        self.history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.skill_registry = None  # 可选 SkillRegistry
+        self.history: list[dict] = [{"role": "system", "content": build_system_prompt(None)}]
         self.mode: str = "chat"  # chat / react / multi_agent
         # 工具调用轨迹 + ReAct 轨迹（用于 UI 实时展示）
         # 每条: {"text": str, "kind": str, "ts": float}
@@ -120,6 +122,30 @@ class AgentApp:
         if self.disable_dangerous:
             for name in ("demo_code_run", "run_terminal"):
                 self.tool_map.pop(name, None)
+
+        # 加载声明式 Skill（可选，skills/ 目录不存在则跳过）
+        self._register_skills()
+
+    def _register_skills(self) -> None:
+        """加载声明式 Skill（可选），成功后更新 history 的 system prompt"""
+        skill_dir = self.cfg.skill_dir
+        if not skill_dir:
+            return
+        import os as _os
+        # 项目根目录: web_ui.py 在 ai_agent/ 下，往上一层
+        project_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        abs_dir = _os.path.join(project_root, skill_dir)
+        if not _os.path.isdir(abs_dir):
+            return
+        try:
+            from ai_agent.skill import SkillRegistry
+            available = list(self.tool_map.keys())
+            self.skill_registry = SkillRegistry(abs_dir, available)
+            # 用包含 Skill 信息的动态 system prompt 更新 history
+            self.history[0] = {"role": "system", "content": build_system_prompt(self.skill_registry)}
+        except Exception as e:
+            print(f"  ⚠️ SkillRegistry 初始化失败: {e}")
+            self.skill_registry = None
 
     def _init_mcp(self):
         """安全初始化 MCPManager：无配置返回 None，连接失败也不崩"""
@@ -307,6 +333,8 @@ class AgentApp:
                 messages=self.history,
                 tools=tools,
                 tool_map=hooked_map,
+                skill_registry=self.skill_registry,
+                mcp_manager=self.mcp_manager,  # ← 传递 MCP 管理器（Skill 内也能用 MCP 工具）
             )
         except RuntimeError as e:
             self.trace(f"❌ 错误: {e}", kind="error")
@@ -418,7 +446,7 @@ class AgentApp:
     def new_session(self) -> tuple[str, list[tuple]]:
         """创建新会话"""
         self.session_id = self.store.create_session(title="新会话", mode=self.mode)
-        self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}]
         self.trace_buffer = []
         self.trace(f"✨ 已创建新会话 {self.session_id}", kind="info")
         return self.trace_html(), []
@@ -429,7 +457,7 @@ class AgentApp:
             return "", []
         saved = self.store.load_messages(session_id)
         self.session_id = session_id
-        self.history = [{"role": "system", "content": SYSTEM_PROMPT}] + saved
+        self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}] + saved
         self.trace_buffer = []
         self.trace(f"✅ 已恢复会话 {session_id}（{len(saved)} 条消息）", kind="info")
         # 转换为 Gradio history 格式
@@ -588,7 +616,7 @@ def build_ui() -> gr.Blocks:
             yield from _app.send(user_text or "", history or [])
 
         def on_clear():
-            _app.history = [{"role": "system", "content": SYSTEM_PROMPT}]
+            _app.history = [{"role": "system", "content": build_system_prompt(_app.skill_registry)}]
             _app.trace("已清空对话", kind="info")
             return _app.trace_html(), []
 
