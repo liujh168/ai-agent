@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>本地 AI Agent 开发 · 新手学习路线图</title>
+<style>
+  :root {
+    --bg: #f6f8fb;
+    --card: #ffffff;
+    --ink: #1f2937;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --primary: #4f46e5;
+    --primary-soft: #eef2ff;
+    --sky: #0ea5e9;
+    --emerald: #10b981;
+    --amber: #f59e0b;
+    --rose: #f43f5e;
+    --shadow: 0 1px 3px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.06);
+    --radius: 16px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(135deg, #4f46e5 0%, #0ea5e9 100%);
+    color: #fff; border-radius: 22px; padding: 38px 34px; box-shadow: var(--shadow);
+    position: relative; overflow: hidden;
+  }
+  .hero::after {
+    content: ""; position: absolute; right: -60px; top: -60px; width: 240px; height: 240px;
+    background: radial-gradient(circle, rgba(255,255,255,.18), transparent 70%); border-radius: 50%;
+  }
+  .hero h1 { margin: 0 0 10px; font-size: 30px; letter-spacing: .5px; }
+  .hero p { margin: 0; opacity: .94; font-size: 15.5px; max-width: 660px; }
+  .hero .tags { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .hero .tag { background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.28); padding: 4px 12px; border-radius: 999px; font-size: 12.5px; }
+
+  /* Progress */
+  .progress-card {
+    margin-top: 22px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 22px; box-shadow: var(--shadow);
+  }
+  .progress-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .progress-head h2 { margin: 0; font-size: 16px; }
+  .progress-head .meta { color: var(--muted); font-size: 13px; }
+  .bar { height: 12px; background: #eef0f4; border-radius: 999px; overflow: hidden; margin-top: 12px; }
+  .bar > span { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--emerald), #34d399); transition: width .5s cubic-bezier(.4,0,.2,1); }
+  .progress-actions { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn {
+    border: 1px solid var(--line); background: #fff; color: var(--ink); padding: 7px 14px; border-radius: 10px;
+    font-size: 13px; cursor: pointer; transition: .15s; font-weight: 500;
+  }
+  .btn:hover { border-color: var(--primary); color: var(--primary); }
+  .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .btn.primary:hover { background: #4338ca; color: #fff; }
+
+  /* Controls */
+  .controls { display: flex; gap: 10px; margin: 22px 0 6px; flex-wrap: wrap; align-items: center; }
+  .controls input[type=search] {
+    flex: 1; min-width: 200px; padding: 9px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14px; outline: none;
+  }
+  .controls input[type=search]:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+  .filter-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { padding: 6px 13px; border-radius: 999px; border: 1px solid var(--line); background: #fff; font-size: 12.5px; cursor: pointer; color: var(--muted); }
+  .chip.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+  /* Stepper / timeline */
+  .stepper { display: flex; gap: 6px; margin: 26px 0 8px; flex-wrap: wrap; }
+  .step {
+    flex: 1 1 0; min-width: 92px; text-align: center; cursor: pointer; padding: 14px 6px; border-radius: 12px;
+    border: 1px solid var(--line); background: #fff; transition: .15s; position: relative;
+  }
+  .step:hover { border-color: var(--primary); transform: translateY(-2px); }
+  .step .num { width: 30px; height: 30px; line-height: 30px; border-radius: 50%; margin: 0 auto 6px; background: var(--primary-soft); color: var(--primary); font-weight: 700; font-size: 14px; }
+  .step.done .num { background: var(--emerald); color: #fff; }
+  .step .lbl { font-size: 12px; color: var(--muted); }
+
+  /* Section titles */
+  .section-title { margin: 34px 0 6px; font-size: 19px; display: flex; align-items: center; gap: 10px; }
+  .section-title .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--primary); }
+
+  /* Cards */
+  .stage {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-top: 14px;
+    box-shadow: var(--shadow); overflow: hidden; transition: border-color .2s;
+  }
+  .stage.highlight { border-color: var(--amber); box-shadow: 0 0 0 3px #fef3c7, var(--shadow); }
+  .stage-head { display: flex; align-items: center; gap: 14px; padding: 18px 20px; cursor: pointer; user-select: none; }
+  .stage-check { flex: none; }
+  .stage-check input { width: 20px; height: 20px; accent-color: var(--emerald); cursor: pointer; }
+  .stage-badge { flex: none; width: 42px; height: 42px; border-radius: 12px; background: var(--primary-soft); color: var(--primary); display: grid; place-items: center; font-weight: 700; font-size: 16px; }
+  .stage-titles { flex: 1; min-width: 0; }
+  .stage-titles h3 { margin: 0; font-size: 16.5px; }
+  .stage-titles .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .stage-meta { flex: none; display: flex; gap: 8px; align-items: center; }
+  .pill { font-size: 11.5px; padding: 3px 9px; border-radius: 999px; background: #f1f5f9; color: var(--muted); white-space: nowrap; }
+  .pill.diff-1 { background: #ecfdf5; color: #059669; }
+  .pill.diff-2 { background: #fffbeb; color: #d97706; }
+  .pill.diff-3 { background: #fef2f2; color: #dc2626; }
+  .chev { transition: transform .25s; color: var(--muted); }
+  .stage.open .chev { transform: rotate(180deg); }
+  .stage-body { max-height: 0; overflow: hidden; transition: max-height .35s ease; }
+  .stage.open .stage-body { max-height: 1600px; }
+  .stage-inner { padding: 4px 22px 22px; border-top: 1px solid var(--line); }
+  .block { margin-top: 16px; }
+  .block h4 { margin: 0 0 7px; font-size: 13.5px; display: flex; align-items: center; gap: 7px; color: var(--ink); }
+  .block h4 .ic { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; font-size: 13px; }
+  .ic.goal { background: #eef2ff; } .ic.concept { background: #ecfeff; } .ic.task { background: #f0fdf4; } .ic.code { background: #fef9c3; } .ic.res { background: #fdf2f8; }
+  ul.tight { margin: 0; padding-left: 18px; }
+  ul.tight li { margin: 4px 0; font-size: 14px; }
+  code, .mono { font-family: "SF Mono", "JetBrains Mono", Consolas, monospace; font-size: 12.5px; background: #f3f4f6; padding: 1px 6px; border-radius: 5px; color: #be123c; }
+  .fileref { display: inline-block; background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 1px 7px; border-radius: 5px; font-size: 12px; font-family: "SF Mono", Consolas, monospace; }
+  .prereq { margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+
+  /* Assessment */
+  .assess { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); margin-top: 30px; }
+  .assess h2 { margin: 0 0 4px; font-size: 17px; }
+  .assess .lead { color: var(--muted); font-size: 13.5px; margin: 0 0 16px; }
+  .q { margin: 14px 0; }
+  .q p { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+  .q label { display: inline-flex; align-items: center; gap: 7px; margin-right: 16px; font-size: 13.5px; cursor: pointer; }
+  .assess-result { margin-top: 16px; padding: 14px 16px; border-radius: 12px; background: var(--primary-soft); color: var(--primary); font-size: 14px; display: none; }
+  .assess-result.show { display: block; }
+
+  .footer { margin-top: 40px; text-align: center; color: var(--muted); font-size: 12.5px; }
+  .hidden { display: none !important; }
+  .done-banner { display: none; margin-top: 14px; padding: 12px 16px; border-radius: 12px; background: #ecfdf5; color: #047857; font-size: 14px; border: 1px solid #a7f3d0; }
+  .done-banner.show { display: block; }
+  @media (max-width: 600px) {
+    .stage-meta .pill.duration { display: none; }
+    .hero { padding: 28px 20px; }
+    .hero h1 { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <h1>🧭 本地 AI Agent 开发 · 新手学习路线图</h1>
+    <p>面向想从零上手「用 Python + 本地大模型搭建 AI Agent」的你。本路线图以当前这个项目（基于 LM Studio 的本地 Agent Demo）为活教材，每一步都告诉你「项目里对应哪段代码」，学完即可读懂并扩展它。</p>
+    <div class="tags">
+      <span class="tag">零依赖 · 可离线</span>
+      <span class="tag">7 个阶段</span>
+      <span class="tag">进度自动保存</span>
+      <span class="tag">项目代码对照</span>
+    </div>
+  </header>
+
+  <!-- Progress -->
+  <section class="progress-card">
+    <div class="progress-head">
+      <h2>📈 我的学习进度</h2>
+      <span class="meta" id="progressMeta">已完成 0 / 7 阶段</span>
+    </div>
+    <div class="bar"><span id="progressBar"></span></div>
+    <div class="done-banner" id="doneBanner">🎉 太棒了！你已完成全部 7 个阶段，已经具备独立扩展这个 Agent 的能力。</div>
+    <div class="progress-actions">
+      <button class="btn" id="expandAll">展开全部</button>
+      <button class="btn" id="collapseAll">收起全部</button>
+      <button class="btn" id="resetProgress">重置进度</button>
+    </div>
+  </section>
+
+  <!-- Controls -->
+  <div class="controls">
+    <input type="search" id="searchBox" placeholder="🔍 搜索阶段 / 概念 / 工具名（如 ReAct、RAG、get_weather）" />
+  </div>
+  <div class="filter-chips" id="filterChips"></div>
+
+  <!-- Stepper -->
+  <div class="stepper" id="stepper"></div>
+
+  <!-- Stages -->
+  <h2 class="section-title"><span class="dot"></span>学习路线（点击任意阶段展开）</h2>
+  <div id="stages"></div>
+
+  <!-- Assessment -->
+  <section class="assess">
+    <h2>🧩 起步自测：我该从哪开始？</h2>
+    <p class="lead">回答 3 个问题，系统会推荐最适合你的起点阶段（不会记录任何信息）。</p>
+    <div class="q">
+      <p>1. 你写过 Python 吗？</p>
+      <label><input type="radio" name="q1" value="2" /> 熟练</label>
+      <label><input type="radio" name="q1" value="1" /> 会一点</label>
+      <label><input type="radio" name="q1" value="0" /> 没写过</label>
+    </div>
+    <div class="q">
+      <p>2. 调用过 LLM API（OpenAI / LM Studio 等）吗？</p>
+      <label><input type="radio" name="q2" value="2" /> 经常</label>
+      <label><input type="radio" name="q2" value="1" /> 试过</label>
+      <label><input type="radio" name="q2" value="0" /> 没有</label>
+    </div>
+    <div class="q">
+      <p>3. 了解「工具调用 / Function Calling」吗？</p>
+      <label><input type="radio" name="q3" value="2" /> 很清楚</label>
+      <label><input type="radio" name="q3" value="1" /> 听说过</label>
+      <label><input type="radio" name="q3" value="0" /> 不懂</label>
+    </div>
+    <button class="btn primary" id="assessBtn">为我推荐起点</button>
+    <div class="assess-result" id="assessResult"></div>
+  </section>
+
+  <div class="footer">
+    本路线图由项目 WIKI 风格文档生成 · 配套代码见 <span class="mono">ai_agent/</span> 目录 · 学习愉快 🚀
+  </div>
+</div>
+
+<script>
+const STAGES = [
+  {
+    id: "s0", n: 0, tag: "基础", title: "预备知识：搞懂 LLM 与对话式 AI",
+    duration: "2 天", diff: 1,
+    goal: "建立对大语言模型的基本心智模型，理解为什么「光会聊天」还不够、为什么需要 Agent。",
+    concepts: [
+      "LLM 本质：基于海量文本训练、按顺序预测下一个 token 的概率模型",
+      "Token 与上下文窗口：输入+输出都按 token 计费/受限；长对话会「超窗」",
+      "Chat Completion：消息分 system / user / assistant / tool 四种角色",
+      "temperature 与采样：值越高越发散，越低越确定",
+      "为什么需要 Agent：模型本身不能查实时信息、不能执行代码、不能访问文件——需要「外挂能力」"
+    ],
+    tasks: [
+      "安装并打开 LM Studio，加载一个对话模型（如 qwen3 系列）",
+      "在 LM Studio Playground 里用 system 指令设定角色，体验对话差异",
+      "故意问一个模型训练数据之外的问题（如「今天北京天气」），观察它的局限"
+    ],
+    code: [
+      ["ai_agent/client.py", "LMStudioClient —— 对 LM Studio 的 OpenAI 兼容接口封装，所有对话都走它"],
+      ["ai_agent/config.py", "Config —— 从环境变量读取 base_url / api_key / model，统一配置入口"]
+    ],
+    res: [
+      "OpenAI 官方《Intro to prompting》",
+      "LM Studio 文档：理解本地模型服务的启动与 /v1 接口"
+    ],
+    prereq: "无前置，零基础友好。"
+  },
+  {
+    id: "s1", n: 1, tag: "提示词", title: "提示词工程基础（Prompt Engineering）",
+    duration: "3 天", diff: 1,
+    goal: "写出稳定、可复现的指令，让模型行为可控——这是 Agent 的「灵魂设定」。",
+    concepts: [
+      "角色设定（system prompt）：定义身份、边界、语气",
+      "明确输出格式：要求「只返回 JSON」「分点回答」能大幅降低后续解析成本",
+      "约束与否定：明确「不要做什么」比只说「做什么」更稳",
+      "Few-shot：给 1~3 个示例，让模型照着学（见阶段 3）",
+      "可复现性：固定 temperature、固定示例，便于评测对比"
+    ],
+    tasks: [
+      "把一条模糊指令「帮我写点关于 AI 的东西」改写成带角色+格式+篇幅约束的指令",
+      "对比 temperature=0.2 与 0.9 下同一问题的输出差异",
+      "用 JSON 模式让模型输出结构化数据，并用代码解析"
+    ],
+    code: [
+      ["ai_agent/app_core.py", "SYSTEM_PROMPT —— 整个 Agent 的「单一数据源」系统提示词，所有入口共享"],
+      ["ai_agent/eval.py", "EvalCase.expected_contains —— 评测用「输出应包含关键词」反向定义了提示词要达成的效果"]
+    ],
+    res: [
+      "《Prompt Engineering Guide》（promptengineering.guide）",
+      "本项目 app_core.py 里的 SYSTEM_PROMPT 是很好的中文范例"
+    ],
+    prereq: "建议先完成阶段 0，理解消息角色。"
+  },
+  {
+    id: "s2", n: 2, tag: "工具", title: "工具调用（Tool / Function Calling）",
+    duration: "4 天", diff: 2,
+    goal: "让模型能「决定调用哪个函数、并填对参数」——Agent 能力的核心跃迁。",
+    concepts: [
+      "Tool Schema：用 JSON Schema 描述函数名、参数、类型，喂给模型",
+      "调用流程：模型输出 tool_call → 你的代码执行函数 → 把结果回传给模型 → 模型继续",
+      "参数回填陷阱：schema 里写的参数名必须和真实函数签名一致，否则会 TypeError",
+      "工具路由：模型根据用户意图自动选工具（天气→get_weather，计算→calculator）",
+      "失败兜底：工具报错时要把错误信息回传，让模型自我纠正"
+    ],
+    tasks: [
+      "给一个 Python 函数手写 JSON Schema，并用 LM Studio 试跑一次工具调用",
+      "故意让 schema 参数名与函数不一致，观察报错，再修正（本项目踩过此坑）",
+      "读本项目 tools/ 目录，列出所有工具及其能力"
+    ],
+    code: [
+      ["ai_agent/app_core.py", "TOOL_SCHEMAS —— 21 种能力的工具定义（含 12 个内联编排闭包）"],
+      ["ai_agent/tools/__init__.py", "导出 9 个基础 schema：WEATHER_TOOL / CALCULATOR_TOOL / WEB_SEARCH_TOOL …"],
+      ["ai_agent/tools/demo.py", "get_weather / calculator —— 最简单的两个工具实现样板"],
+      ["ai_agent/tools/search.py", "web_search —— 博查优先、失败降级 DuckDuckGo 的健壮实现"],
+      ["ai_agent/tools/sql.py", "sql_query —— 数据库查询工具"],
+      ["ai_agent/tools/file.py", "file_write / file_read —— 文件读写工具"]
+    ],
+    res: [
+      "OpenAI《Function calling》文档",
+      "本项目 eval 用例 route_weather_known_city（验证工具路由正确性）"
+    ],
+    prereq: "完成阶段 1，能稳定控制模型输出。"
+  },
+  {
+    id: "s3", n: 3, tag: "推理", title: "推理范式：ReAct / CoT / Reflexion / Few-shot",
+    duration: "5 天", diff: 2,
+    goal: "掌握让模型「先想、再做、再看结果」的编排模式，处理多步复杂任务。",
+    concepts: [
+      "Chain-of-Thought（CoT）：让模型显式写出推理步骤再给答案",
+      "ReAct：Thought → Action → Observation 循环，直到得出 Final Answer",
+      "Reflexion：先出初稿，自我批评，再修正（迭代提升质量）",
+      "Few-shot：在提示里给示例，引导分类/抽取等任务",
+      "结构化抽取：强制模型输出 JSON 字段（姓名/年龄/城市）"
+    ],
+    tasks: [
+      "在纸上手画一个 ReAct 轨迹：查天气→算日期，标出 Thought/Action/Observation",
+      "对比「直接回答」与「CoT 回答」同一道多步题的准确率",
+      "跑一次 eval 的 react 用例，读它的推理轨迹"
+    ],
+    code: [
+      ["ai_agent/app_core.py", "clean_react_tool_map / make_summarize_history —— ReAct 与历史压缩的核心逻辑"],
+      ["ai_agent/eval.py", "react_multi_step / react_weather_book / reflexion_iterative / few_shot_sentiment / chain_of_thought / structured_extract_basic 等用例"]
+    ],
+    res: [
+      "论文《ReAct: Synergizing Reasoning and Acting》",
+      "论文《Reflexion: Language Agents with Verbal Reinforcement》"
+    ],
+    prereq: "完成阶段 2，理解工具调用闭环。"
+  },
+  {
+    id: "s4", n: 4, tag: "RAG", title: "RAG 检索增强生成",
+    duration: "5 天", diff: 3,
+    goal: "让 Agent 基于你的私有知识（PDF/文档）回答，弥补模型「不知道内部资料」的短板。",
+    concepts: [
+      "切分（Chunking）：长文档拆成小块，控制每块大小与重叠",
+      "向量化（Embedding）：把文本变成向量，便于相似度比较",
+      "检索（Retrieve）：用问题向量召回最相关的若干块",
+      "注入（Augment）：把召回内容拼进提示词，让模型据此回答",
+      "缓存：embedding 计算慢，结果应缓存到本地文件"
+    ],
+    tasks: [
+      "对一个 txt 文档做切分，画出自上而下的 RAG 流程图",
+      "用 LM Studio 的 embedding 模型把一句话变成向量",
+      "在项目中关闭/开启 RAG（--no-rag）对比回答差异"
+    ],
+    code: [
+      ["ai_agent/rag.py", "RAG 核心：切分、向量化、检索、上下文注入"],
+      ["ai_agent/config.py", "EMBED_MODEL / RAG_CHUNK_SIZE / RAG_OVERLAP / RAG_CACHE_FILE —— RAG 相关配置"]
+    ],
+    res: [
+      "《RAG 实战》系列文章（langchain 中文站）",
+      "项目 docs/ 下关于 Agent 与知识库的文档"
+    ],
+    prereq: "完成阶段 2（工具调用）——RAG 检索本身也常作为一个「工具」被调用。"
+  },
+  {
+    id: "s5", n: 5, tag: "多智能体", title: "多智能体协作（Multi-Agent）",
+    duration: "4 天", diff: 3,
+    goal: "把复杂任务拆给多个角色（规划者/执行者/评审者）协作完成，突破单 Agent 上限。",
+    concepts: [
+      "角色分工：Planner 拆解任务、Executor 执行、Critic 评审",
+      "任务拆解：把大目标变成可执行的子任务清单",
+      "评审闭环：Critic 不通过则打回重做，形成质量保障",
+      "编排成本：多 Agent 意味着更多模型调用，注意延迟与费用",
+      "适用边界：不是所有任务都需要多 Agent，简单任务单 Agent 更快"
+    ],
+    tasks: [
+      "设计一个「写一份 AI Agent 简介」的 3-Agent 协作流程",
+      "跑 eval 的 banner_multi_agent 用例，观察 Planner/Executor/Critic 的产出",
+      "思考：哪些任务其实用单 Agent + 工具就够了？"
+    ],
+    code: [
+      ["ai_agent/skill.py", "多 Agent 编排：required_tools 与角色定义"],
+      ["ai_agent/eval.py", "banner_multi_agent 用例 —— Planner+Executor+Critic 协作示例"]
+    ],
+    res: [
+      "论文《AutoGen / MetaGPT》中的多 Agent 协作范式",
+      "项目 eval_report 里 multi_agent 维度的通过情况"
+    ],
+    prereq: "完成阶段 3（单 Agent 推理）后再学多 Agent 更顺。"
+  },
+  {
+    id: "s6", n: 6, tag: "工程化", title: "工程化与自动化评测",
+    duration: "4 天", diff: 2,
+    goal: "把「能跑的 demo」变成「可验证、可部署」的系统——这是 Agent 上生产的最后一公里。",
+    concepts: [
+      "本地模型服务：LM Studio 在 localhost:1234 暴露 /v1 接口",
+      "Web UI：用 Gradio 快速包一个可对话的界面",
+      "自动化评测：用「金标准用例（gold cases）」逐条跑、自动打分",
+      "可视化报告：评测结果生成 HTML，能力维度一目了然",
+      "环境坑：系统代理会劫持 localhost；危险工具默认关闭需显式开启"
+    ],
+    tasks: [
+      "运行一次 `python -m ai_agent.eval --no-rag`，读懂报告",
+      "打开生成的 eval_report_*.html，看各能力维度通过率",
+      "尝试加一条自己的 EvalCase，验证新功能"
+    ],
+    code: [
+      ["ai_agent/eval.py", "EvalCase / EVAL_CASES —— 评测框架与全部用例定义"],
+      ["ai_agent/web_ui.py", "Gradio Web 入口，与 CLI 共享核心逻辑"],
+      ["main.py", "CLI 入口"],
+      ["ai_agent/config.py", "requires-python 与代理相关的环境注意事项"]
+    ],
+    res: [
+      "项目 docs/通用Agent时代价值迁移.md（谈「评测工程是上生产的必需品」）",
+      "本项目 eval_report_run.html 是现成的报告样例"
+    ],
+    prereq: "完成阶段 2~3，已有可运行能力后再做评测。"
+  },
+  {
+    id: "s7", n: 7, tag: "安全", title: "安全与上线防护",
+    duration: "3 天", diff: 2,
+    goal: "理解 Agent 的特有风险，掌握关键防护手段——能在本地玩，更要能安全上线。",
+    concepts: [
+      "危险工具开关：run_terminal / demo_code_run 默认关闭，需显式启用",
+      "破坏性操作确认：DROP TABLE 等不可逆 SQL 必须人工确认",
+      "命令黑名单：system 工具对危险 shell 命令做动词+链式绕过检测",
+      "不可信输入：模型生成的命令/代码可能有害，执行前要有边界",
+      "最小权限：Agent 只应拥有完成任务所必需的能力"
+    ],
+    tasks: [
+      "读 system.py，列出它拦截的危险命令类型",
+      "跑 eval 的 sql_security_drop_blocked，看确认机制如何拦截",
+      "给自己的工具加一条安全检查，写单元测试覆盖它"
+    ],
+    code: [
+      ["ai_agent/tools/system.py", "run_terminal / demo_code_run + 命令黑名单 + SQL 人工确认逻辑"],
+      ["ai_agent/eval.py", "sql_security_drop_blocked / calculator_security_blocked 安全用例"]
+    ],
+    res: [
+      "OWASP Top 10 for LLM Applications（LLM01~LLM10）",
+      "项目 Memory 中记录的「危险工具默认关闭」约定"
+    ],
+    prereq: "完成阶段 2、6，理解工具执行链路后学安全最直观。"
+  }
+];
+
+const TOTAL = STAGES.length;
+const STORE_KEY = "ai_agent_roadmap_progress_v1";
+const TAGS = ["全部", ...Array.from(new Set(STAGES.map(s => s.tag)))];
+
+let done = loadProgress();
+
+function loadProgress() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; }
+  catch { return {}; }
+}
+function saveProgress() { localStorage.setItem(STORE_KEY, JSON.stringify(done)); }
+
+function tagClass(tag) {
+  const map = {"基础":"diff-1","提示词":"diff-1","工具":"diff-2","推理":"diff-2","RAG":"diff-3","多智能体":"diff-3","工程化":"diff-2","安全":"diff-2"};
+  return map[tag] || "";
+}
+
+// ---- render stepper ----
+const stepper = document.getElementById("stepper");
+STAGES.forEach(s => {
+  const el = document.createElement("div");
+  el.className = "step" + (done[s.id] ? " done" : "");
+  el.dataset.id = s.id;
+  el.innerHTML = `<div class="num">${done[s.id] ? "✓" : s.n}</div><div class="lbl">${s.title.split("：")[0]}</div>`;
+  el.onclick = () => {
+    const card = document.getElementById(s.id);
+    card.scrollIntoView({block: "center"});
+    card.classList.add("open", "highlight");
+    setTimeout(() => card.classList.remove("highlight"), 1600);
+  };
+  stepper.appendChild(el);
+});
+
+// ---- render stages ----
+const stagesRoot = document.getElementById("stages");
+STAGES.forEach(s => {
+  const card = document.createElement("div");
+  card.className = "stage" + (done[s.id] ? " open" : "");
+  card.id = s.id;
+  card.dataset.tag = s.tag;
+  card.dataset.text = (s.title + " " + s.concepts.join(" ") + " " + s.code.map(c=>c[0]).join(" ")).toLowerCase();
+
+  const concepts = s.concepts.map(c => `<li>${c}</li>`).join("");
+  const tasks = s.tasks.map(c => `<li>${c}</li>`).join("");
+  const code = s.code.map(c => `<li><span class="fileref">${c[0]}</span> — ${c[1]}</li>`).join("");
+  const res = s.res.map(c => `<li>${c}</li>`).join("");
+
+  card.innerHTML = `
+    <div class="stage-head">
+      <div class="stage-check"><input type="checkbox" ${done[s.id] ? "checked" : ""} aria-label="标记完成" /></div>
+      <div class="stage-badge">${s.n}</div>
+      <div class="stage-titles">
+        <h3>${s.title}</h3>
+        <div class="sub">${s.goal}</div>
+      </div>
+      <div class="stage-meta">
+        <span class="pill duration">⏱ ${s.duration}</span>
+        <span class="pill ${tagClass(s.tag)}">${s.tag}</span>
+        <span class="chev">▾</span>
+      </div>
+    </div>
+    <div class="stage-body">
+      <div class="stage-inner">
+        <div class="block"><h4><span class="ic goal">🎯</span>学习目标</h4><p style="margin:0;font-size:14px;color:var(--ink)">${s.goal}</p></div>
+        <div class="block"><h4><span class="ic concept">🧠</span>核心概念</h4><ul class="tight">${concepts}</ul></div>
+        <div class="block"><h4><span class="ic task">✋</span>动手任务</h4><ul class="tight">${tasks}</ul></div>
+        <div class="block"><h4><span class="ic code">📁</span>本项目对应代码</h4><ul class="tight">${code}</ul></div>
+        <div class="block"><h4><span class="ic res">🔗</span>推荐资源</h4><ul class="tight">${res}</ul></div>
+        <div class="prereq">⬅️ 前置：${s.prereq}</div>
+      </div>
+    </div>`;
+
+  const checkbox = card.querySelector("input[type=checkbox]");
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) done[s.id] = true; else delete done[s.id];
+    saveProgress();
+    card.classList.toggle("open", !!done[s.id]);
+    updateProgress();
+    const st = stepper.querySelector(`[data-id="${s.id}"]`);
+    if (st) { st.classList.toggle("done", !!done[s.id]); st.querySelector(".num").textContent = done[s.id] ? "✓" : s.n; }
+  });
+
+  card.querySelector(".stage-head").addEventListener("click", (e) => {
+    if (e.target.tagName === "INPUT") return;
+    card.classList.toggle("open");
+  });
+
+  stagesRoot.appendChild(card);
+});
+
+// ---- progress ----
+function updateProgress() {
+  const count = Object.keys(done).length;
+  document.getElementById("progressMeta").textContent = `已完成 ${count} / ${TOTAL} 阶段`;
+  document.getElementById("progressBar").style.width = (count / TOTAL * 100) + "%";
+  document.getElementById("doneBanner").classList.toggle("show", count === TOTAL);
+}
+updateProgress();
+
+// ---- buttons ----
+document.getElementById("expandAll").onclick = () => document.querySelectorAll(".stage").forEach(c => c.classList.add("open"));
+document.getElementById("collapseAll").onclick = () => document.querySelectorAll(".stage").forEach(c => { if (!done[c.id]) c.classList.remove("open"); });
+document.getElementById("resetProgress").onclick = () => {
+  if (confirm("确定要清空学习进度吗？")) {
+    done = {}; saveProgress();
+    document.querySelectorAll(".stage").forEach(c => { if (!c.classList.contains("open")) {} c.classList.remove("open"); });
+    document.querySelectorAll(".stage-check input").forEach(i => i.checked = false);
+    document.querySelectorAll(".step").forEach(st => { st.classList.remove("done"); const n = STAGES.find(s=>s.id===st.dataset.id).n; st.querySelector(".num").textContent = n; });
+    updateProgress();
+  }
+};
+
+// ---- filter chips ----
+const chipsRoot = document.getElementById("filterChips");
+TAGS.forEach((t, i) => {
+  const c = document.createElement("span");
+  c.className = "chip" + (i === 0 ? " active" : "");
+  c.textContent = t;
+  c.onclick = () => {
+    document.querySelectorAll(".chip").forEach(x => x.classList.remove("active"));
+    c.classList.add("active");
+    applyFilter();
+  };
+  chipsRoot.appendChild(c);
+});
+
+const searchBox = document.getElementById("searchBox");
+searchBox.addEventListener("input", applyFilter);
+
+function applyFilter() {
+  const q = searchBox.value.trim().toLowerCase();
+  const activeTag = document.querySelector(".chip.active")?.textContent || "全部";
+  document.querySelectorAll(".stage").forEach(card => {
+    const matchTag = activeTag === "全部" || card.dataset.tag === activeTag;
+    const matchQ = !q || card.dataset.text.includes(q);
+    card.classList.toggle("hidden", !(matchTag && matchQ));
+  });
+  document.querySelectorAll(".step").forEach(st => {
+    const id = st.dataset.id;
+    const card = document.getElementById(id);
+    st.classList.toggle("hidden", card.classList.contains("hidden"));
+  });
+}
+
+// ---- assessment ----
+document.getElementById("assessBtn").onclick = () => {
+  const g = n => { const el = document.querySelector(`input[name=${n}]:checked`); return el ? +el.value : null; };
+  const a = g("q1"), b = g("q2"), c = g("q3");
+  const result = document.getElementById("assessResult");
+  if (a === null || b === null || c === null) {
+    result.textContent = "请先回答全部 3 个问题 🙏";
+    result.classList.add("show");
+    return;
+  }
+  const score = a + b + c;
+  let target;
+  if (score <= 2) target = STAGES[0];
+  else if (score <= 4) target = STAGES[2];
+  else target = STAGES[4];
+  result.innerHTML = `根据你的回答（得分 ${score}/6），建议从 <b>阶段 ${target.n} · ${target.title}</b> 开始。点击下方对应节点即可跳转 👇`;
+  result.classList.add("show");
+  const card = document.getElementById(target.id);
+  card.scrollIntoView({block: "center"});
+  card.classList.add("open", "highlight");
+  setTimeout(() => card.classList.remove("highlight"), 1800);
+  const st = stepper.querySelector(`[data-id="${target.id}"]`);
+  if (st) st.scrollIntoView({block: "nearest"});
+};
+</script>
+</body>
+</html>
