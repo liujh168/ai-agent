@@ -46,6 +46,9 @@ class EvalCase:
         default_factory=list
     )  # 期望完整工具调用序列（顺序敏感，用于 ReAct/规划）
     expected_contains: list[str] = field(default_factory=list)  # 最终输出应包含的关键词（全部满足才算 pass）
+    expected_tool_output_contains: list[str] = field(
+        default_factory=list
+    )  # 工具返回值应包含的关键词（适合文件读取、查询等 I/O 用例）
     expected_not_contains: list[str] = field(default_factory=list)  # 最终输出不应包含的关键词
     expected_min_len: int = 0  # 最终输出最少字符数（>0 时生效，用于确保非空）
     description: str = ""  # 用例说明
@@ -97,8 +100,8 @@ EVAL_CASES: list[EvalCase] = [
         capability="tool_routing",
         prompt="读取一下 README.md 文件的内容",
         expected_tool="file_read",
-        expected_contains=["AI Agent"],
-        description="模型应路由到 file_read 并成功返回文件内容",
+        expected_tool_output_contains=["AI Agent"],
+        description="模型应路由到 file_read，且工具成功读取到文件内容",
     ),
     EvalCase(
         name="route_sql_query",
@@ -251,6 +254,7 @@ class ToolCallTracker:
     def __init__(self, tool_map: dict):
         self.original = tool_map
         self.calls: list[str] = []
+        self.results: list[tuple[str, str]] = []
 
     def build_tracked(self) -> dict:
         """返回包装后的 tool_map"""
@@ -265,12 +269,15 @@ class ToolCallTracker:
         @wraps(func)
         def wrapper(*args, **kwargs):
             self.calls.append(name)
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            self.results.append((name, result if isinstance(result, str) else str(result)))
+            return result
 
         return wrapper
 
     def reset(self):
         self.calls.clear()
+        self.results.clear()
 
 
 # ============================================================
@@ -395,12 +402,17 @@ class Evaluator:
             if kw not in (output or ""):
                 failures.append(f"输出应包含 '{kw}'，但未找到")
 
-        # 4. 排除关键词检查
+        # 4. 工具返回值关键词检查（适用于文件读取、查询等 I/O 用例）
+        for kw in case.expected_tool_output_contains:
+            if not any(kw in content for _, content in tracker.results):
+                failures.append(f"工具返回内容应包含 '{kw}'，但未找到")
+
+        # 5. 排除关键词检查
         for kw in case.expected_not_contains:
             if kw in (output or ""):
                 failures.append(f"输出不应包含 '{kw}'，但出现了")
 
-        # 5. 最少长度检查
+        # 6. 最少长度检查
         if case.expected_min_len > 0 and len(output or "") < case.expected_min_len:
             failures.append(
                 f"输出太短（{len(output or '')} 字符 < {case.expected_min_len}），应为正常文本回复"

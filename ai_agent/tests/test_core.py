@@ -17,7 +17,7 @@ from ai_agent.app_core import (  # noqa: E402
     clean_react_tool_map,
 )
 from ai_agent.config import Config  # noqa: E402
-from ai_agent.eval import EVAL_CASES  # noqa: E402
+from ai_agent.eval import EVAL_CASES, EvalCase, Evaluator, ToolCallTracker  # noqa: E402
 from ai_agent.multi_agent import _parse_critic_decision, _parse_subtasks  # noqa: E402
 from ai_agent.rag import RAGKnowledgeBase  # noqa: E402
 from ai_agent.tools import run_code, run_terminal  # noqa: E402
@@ -110,6 +110,40 @@ class TestEvalRoutingConsistency:
             assert case.expected_tool in SYSTEM_PROMPT, (
                 f"SYSTEM_PROMPT 未提示调用 {case.expected_tool}，{case.name} 评测将失败"
             )
+
+
+class TestEvalToolOutputChecks:
+    def test_tracker_captures_tool_results(self):
+        tracker = ToolCallTracker({"echo": lambda: "AI Agent"})
+        tracked = tracker.build_tracked()
+
+        assert tracked["echo"]() == "AI Agent"
+        assert tracker.calls == ["echo"]
+        assert tracker.results == [("echo", "AI Agent")]
+
+    def test_expected_tool_output_can_satisfy_file_read_case(self):
+        class _FakeClient:
+            def chat_with_tools(self, messages, tools, tool_map, **kwargs):
+                tool_map["file_read"]("README.md")
+                return "文件内容已读取。"
+
+        evaluator = Evaluator(
+            client=_FakeClient(),
+            system_prompt="",
+            tools=[],
+            tool_map={"file_read": lambda path: "# AI Agent 教学演示"},
+        )
+        case = EvalCase(
+            name="file_read_output_check",
+            capability="tool_routing",
+            prompt="读取 README.md",
+            expected_tool="file_read",
+            expected_tool_output_contains=["AI Agent"],
+        )
+
+        result = evaluator._evaluate_one(case)
+
+        assert result.passed, result.reason
 
 
 # ============================================================
