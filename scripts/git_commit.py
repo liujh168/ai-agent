@@ -101,18 +101,19 @@ def collect_file_blobs(file_paths: list[str], root: str = ".") -> dict:
     return blobs
 
 
-def build_tree_recursive(existing_tree_sha: str, new_blobs: dict, root: str = ".") -> str:
+def build_tree_recursive(existing_tree_sha: str, new_blobs: dict, root: str = ".", deletions: dict = None) -> str:
     """
     基于已有 tree，添加/覆盖 new_blobs 中的文件，构建新的完整 tree。
     关键：保留 existing tree 中所有未被修改的条目，只替换修改的、新增新增的。
     new_blobs: {相对路径 (如 'ai_agent/persistence.py'): blob_sha}
+    deletions: {相对路径: True}，这些条目会从版本库中移除（处理文件删除）
     """
     root = os.path.abspath(root)
+    deletions = deletions or {}
 
-    # 按顶层目录分组
+    # 按顶层目录分组 blob
     dir_blobs: dict[str, dict] = {}  # top_dir -> {rel_path_from_top: blob_sha}
     root_blobs: dict[str, str] = {}  # 直接在根目录的文件
-
     for rel, sha in new_blobs.items():
         if "/" in rel:
             top = rel.split("/")[0]
@@ -120,6 +121,17 @@ def build_tree_recursive(existing_tree_sha: str, new_blobs: dict, root: str = ".
             dir_blobs.setdefault(top, {})[sub] = sha
         else:
             root_blobs[rel] = sha
+
+    # 分组 deletions：root 级 vs 子目录级
+    root_del: set = set()
+    dir_del: dict[str, dict] = {}  # dir_name -> {sub_rel: True}
+    for rel in deletions:
+        if "/" in rel:
+            top = rel.split("/")[0]
+            sub = "/".join(rel.split("/")[1:])
+            dir_del.setdefault(top, {})[sub] = True
+        else:
+            root_del.add(rel)
 
     # 读取现有 tree 条目
     existing_entries = git_ls_tree_entries(existing_tree_sha)
@@ -132,6 +144,9 @@ def build_tree_recursive(existing_tree_sha: str, new_blobs: dict, root: str = ".
         if is_tree:
             existing_dirs[name] = sha
         else:
+            # 被删除？
+            if name in root_del:
+                continue
             # 被新 blob 覆盖？
             if name in root_blobs:
                 sha = root_blobs.pop(name)
@@ -142,20 +157,29 @@ def build_tree_recursive(existing_tree_sha: str, new_blobs: dict, root: str = ".
         mode = "100755" if os.access(os.path.join(root, name), os.X_OK) else "100644"
         root_entries.append((mode, name, sha))
 
-    # 处理子目录：遍历 existing_dirs + 新增的 dir_blobs 目录
+    # 处理子目录
     all_dir_names = set(existing_dirs.keys()) | set(dir_blobs.keys())
     for dir_name in all_dir_names:
+        # 既不在版本库、又无新增内容、也无删除项 → 无意义，跳过
+        if dir_name in dir_del and dir_name not in dir_blobs and dir_name not in existing_dirs:
+            continue
         dir_root = os.path.join(root, dir_name)
+        sub_del = dir_del.get(dir_name, {})
         if dir_name in dir_blobs and dir_name in existing_dirs:
-            # 目录已存在 + 有修改 → 递归
+            # 目录已存在 + 有修改/删除 → 递归
             sub_tree_sha = build_tree_recursive(
-                existing_dirs[dir_name], dir_blobs[dir_name], dir_root
+                existing_dirs[dir_name], dir_blobs[dir_name], dir_root, deletions=sub_del
             )
         elif dir_name in dir_blobs:
             # 全新目录
             sub_entries = [("100644", sub_rel, blob_sha)
                             for sub_rel, blob_sha in dir_blobs[dir_name].items()]
             sub_tree_sha = build_tree_from_entries(sub_entries)
+        elif dir_name in dir_del and dir_name in existing_dirs:
+            # 仅删除（无新增）→ 递归移除条目
+            sub_tree_sha = build_tree_recursive(
+                existing_dirs[dir_name], {}, dir_root, deletions=sub_del
+            )
         else:
             # 未修改的目录 → 直接保留原 tree sha
             sub_tree_sha = existing_dirs[dir_name]
@@ -186,19 +210,27 @@ def main():
 
     os.chdir(args.root)
 
-    # 1. 收集所有要 add 的文件（自动展开目录）
+    # 1. 收集所有要 add 的文件；磁盘上不存在的路径视为“删除”请求
     files_to_add = []
+    deletions = {}
+    root_abs = os.path.abspath(args.root)
     for path in args.add:
         if os.path.isdir(path):
             for dirpath, _, filenames in os.walk(path):
                 for fn in filenames:
                     full = os.path.join(dirpath, fn)
                     files_to_add.append(full)
-        else:
+            continue
+        abs_path = os.path.abspath(path)
+        if os.path.exists(abs_path):
             files_to_add.append(path)
+        else:
+            rel = os.path.relpath(abs_path, root_abs).replace("\\", "/")
+            deletions[rel] = True
+            print(f"  🗑️  删除（从版本库移除）: {rel}")
 
-    if not files_to_add:
-        print("[ERROR] 没有可提交的文件", file=sys.stderr)
+    if not files_to_add and not deletions:
+        print("[ERROR] 没有可提交的文件或删除项", file=sys.stderr)
         sys.exit(1)
 
     # 2. 读取 HEAD
@@ -218,8 +250,8 @@ def main():
     # 3. 创建 blobs
     new_blobs = collect_file_blobs(files_to_add, root=args.root)
 
-    # 4. 构建新 tree（基于 HEAD tree + 新/改文件）
-    new_tree_sha = build_tree_recursive(head_tree_sha, new_blobs, root=args.root)
+    # 4. 构建新 tree（基于 HEAD tree + 新/改文件 - 删除项）
+    new_tree_sha = build_tree_recursive(head_tree_sha, new_blobs, root=args.root, deletions=deletions)
     print(f"\n新 tree: {new_tree_sha[:12]}")
 
     # 5. 创建新 commit
