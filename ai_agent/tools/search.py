@@ -1,6 +1,7 @@
 """搜索类工具：web_search（优先博查 AI 搜索，降级 DuckDuckGo）"""
+
 import os
-import json
+
 import requests
 
 
@@ -54,6 +55,7 @@ def web_search(query: str, max_results: int = 3) -> str:
     # ---------- 路径 2：降级 DuckDuckGo ----------
     try:
         from ddgs import DDGS
+
         results = DDGS().text(query, max_results=max_results)
         if not results:
             return "DuckDuckGo 返回空结果"

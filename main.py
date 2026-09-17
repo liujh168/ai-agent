@@ -16,25 +16,31 @@
 # ---------- 加载 .env 环境变量 ----------
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass  # 未安装 python-dotenv 时跳过（仍可通过系统环境变量配置）
 
-from ai_agent.client import LMStudioClient
-from ai_agent.rag import RAGKnowledgeBase
-from ai_agent.persistence import ChatStore, DEFAULT_DB_PATH
-from ai_agent.config import Config
+import logging
+import os
+import time
+
 from ai_agent.app_core import (
     SYSTEM_PROMPT as _CORE_SYSTEM_PROMPT,
-    TOOL_SCHEMAS,
-    TOOL_COUNT,
-    build_tool_map,
-    build_system_prompt,
 )
-
-import os
-import logging
-import time
+from ai_agent.app_core import (
+    TOOL_COUNT,
+    TOOL_SCHEMAS,
+    build_system_prompt,
+    build_tool_executor,
+    build_tool_map,
+    filter_tool_schemas,
+)
+from ai_agent.client import LMStudioClient
+from ai_agent.config import Config
+from ai_agent.console import configure_utf8_output
+from ai_agent.persistence import DEFAULT_DB_PATH, ChatStore
+from ai_agent.rag import RAGKnowledgeBase
 
 # ---------- 日志配置 ----------
 logging.basicConfig(
@@ -43,11 +49,13 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("Agent")
+configure_utf8_output()
 
 
 # ============================================================
 # 交互式 Agent 演示
 # ============================================================
+
 
 class AgentDemoApp:
     """交互式 Agent 演示应用：初始化环境、注册工具并运行自然语言交互循环。"""
@@ -69,11 +77,26 @@ class AgentDemoApp:
     SYSTEM_PROMPT = _CORE_SYSTEM_PROMPT
     TOOLS = TOOL_SCHEMAS
 
-    def __init__(self, db_path: str = DEFAULT_DB_PATH):
+    def __init__(
+        self,
+        db_path: str = DEFAULT_DB_PATH,
+        enable_dangerous_tools: bool | None = None,
+    ):
         self.cfg = Config.from_env()
-        self.client = LMStudioClient(self.cfg.base_url, self.cfg.api_key, self.cfg.model)
+        self.project_root = os.path.abspath(self.cfg.project_root)
+        self.workspace_root = os.path.abspath(self.cfg.workspace_root)
+        self.enable_dangerous_tools = (
+            self.cfg.enable_dangerous_tools if enable_dangerous_tools is None else enable_dangerous_tools
+        )
+        self.client = LMStudioClient(
+            self.cfg.base_url,
+            self.cfg.api_key,
+            self.cfg.model,
+            timeout=self.cfg.request_timeout,
+        )
         self.rag: RAGKnowledgeBase | None = None
         self.tool_map: dict = {}
+        self.tool_executor = None
         self.skill_registry = None  # 可选 SkillRegistry（运行时扫描 skills/ 目录）
         self.history: list[dict] = []
         # ---------- 对话持久化 ----------
@@ -104,9 +127,15 @@ class AgentDemoApp:
                 embed_model=self.cfg.embed_model,
                 chunk_size=self.cfg.chunk_size,
                 chunk_overlap=self.cfg.chunk_overlap,
-                cache_file=self.cfg.rag_cache_file,
+                cache_file=(
+                    self.cfg.rag_cache_file
+                    if os.path.isabs(self.cfg.rag_cache_file)
+                    else os.path.join(self.project_root, self.cfg.rag_cache_file)
+                ),
+                request_timeout=self.cfg.request_timeout,
             )
-            n_chunks = self.rag.build(self.RAG_FILES)
+            files = [os.path.join(self.project_root, path) for path in self.RAG_FILES]
+            n_chunks = self.rag.build(files)
             print(f"[OK] 知识库就绪：{n_chunks} 个文本片段")
         except Exception as e:
             print(f"[WARN] RAG 初始化失败（{e}），知识库问答将不可用")
@@ -114,7 +143,8 @@ class AgentDemoApp:
 
     def _create_test_image(self) -> None:
         """用 Pillow 生成一张测试图表，供图像识别演示（已存在则跳过）"""
-        if os.path.exists(self.TEST_IMAGE):
+        image_path = os.path.join(self.project_root, self.TEST_IMAGE)
+        if os.path.exists(image_path):
             log.debug("测试图片已存在，跳过生成")
             return
         try:
@@ -129,19 +159,53 @@ class AgentDemoApp:
                 draw.text((x + 20, 400 - h - 25), label, fill="black")
                 x += 140
             draw.text((20, 20), "2026 AI Field Attention Survey", fill="black")
-            img.save(self.TEST_IMAGE)
-            print(f"[OK] 已生成测试图片 {self.TEST_IMAGE} 供图像识别演示")
+            img.save(image_path)
+            print(f"[OK] 已生成测试图片 {image_path} 供图像识别演示")
         except Exception as e:
             print(f"[WARN] 测试图片生成失败（{e}），图像识别演示将不可用")
 
     def _register_tools(self) -> None:
         """注册演示工具（统一调用 app_core.build_tool_map 构建工具映射）"""
         self.tool_map = build_tool_map(
-            self.client, lambda: self.rag, self.TEST_IMAGE,
+            self.client,
+            lambda: self.rag,
+            os.path.join(self.project_root, self.TEST_IMAGE),
             get_history=lambda: self.history,
             set_history=lambda h: setattr(self, "history", h),
+            workspace_root=self.workspace_root,
+        )
+        self.tool_executor = build_tool_executor(
+            self.tool_map,
+            allow_write=True,
+            allow_execute=self.enable_dangerous_tools,
+            allow_mcp=True,
+            confirm_write=True,
+            confirm_execute=True,
+            confirm_mcp=True,
+            mcp_allowlist=self.cfg.mcp_allowed_tools,
+            confirm=self._confirm_tool,
         )
         log.info("工具注册完成，共 %d 个工具", len(self.tool_map))
+
+    def _confirm_tool(self, name: str, risk: str, arguments: dict) -> bool:
+        print(f"\n[安全确认] 工具 {name}（风险: {risk}）")
+        print(f"  参数: {arguments}")
+        try:
+            reply = input("  允许执行？输入 y/yes 确认: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return reply in {"y", "yes", "ok", "确认", "执行"}
+
+    @staticmethod
+    def _on_agent_event(event) -> None:
+        if event.kind == "tool_started":
+            print(f"\n[Tool Call] {event.payload['name']}({event.payload['arguments']})")
+        elif event.kind == "tool_finished":
+            status = "OK" if event.payload["ok"] else "ERROR"
+            preview = event.payload["content"][:200]
+            print(f"[Tool Result:{status}] {preview}")
+        elif event.kind == "error" and event.payload.get("iteration"):
+            print(f"[Agent Event] {event.payload['message']}")
 
     def _register_skills(self) -> None:
         """加载声明式 Skill（可选，skills/ 目录不存在则跳过）"""
@@ -155,6 +219,7 @@ class AgentDemoApp:
             return
         try:
             from ai_agent.skill import SkillRegistry
+
             available = list(self.tool_map.keys())
             self.skill_registry = SkillRegistry(abs_dir, available)
         except Exception as e:
@@ -191,7 +256,7 @@ class AgentDemoApp:
         self._build_knowledge_base()
         self._create_test_image()
         self._register_tools()
-        self._register_skills()   # ← 新增：加载声明式 Skill（可选）
+        self._register_skills()  # ← 新增：加载声明式 Skill（可选）
         self._print_banner()
 
         # 用动态 system prompt（包含 Skill 列表简述）
@@ -235,9 +300,12 @@ class AgentDemoApp:
                 t0 = time.time()
                 reply = self.client.chat_with_tools(
                     messages=self.history,
-                    tools=self.TOOLS,
+                    tools=filter_tool_schemas(self.TOOLS, self.tool_executor.policy),
                     tool_map=self.tool_map,
                     skill_registry=self.skill_registry,  # ← 新增：让 Skill 路由生效
+                    tool_executor=self.tool_executor,
+                    on_event=self._on_agent_event,
+                    session_id=self.session_id,
                 )
                 dt = time.time() - t0
                 print(reply)
@@ -249,19 +317,22 @@ class AgentDemoApp:
                     self.store.append(self.session_id, "assistant", reply)
 
                 # ===== 长对话自动摘要压缩 =====
-                total_chars = sum(len(m["content"]) for m in self.history)
+                total_chars = sum(len(m.get("content") or "") for m in self.history)
                 if total_chars > self.HISTORY_MAX_CHARS:
-                    print(f"\n[系统] 对话历史已达 {total_chars} 字符（阈值 {self.HISTORY_MAX_CHARS}），自动压缩中...")
+                    print(
+                        f"\n[系统] 对话历史已达 {total_chars} 字符（阈值 {self.HISTORY_MAX_CHARS}），自动压缩中..."
+                    )
                     self.history = self.client.summarize_messages(self.history, keep_recent=4)
-                    now_chars = sum(len(m["content"]) for m in self.history)
+                    now_chars = sum(len(m.get("content") or "") for m in self.history)
                     print(f"[系统] 压缩完成，剩余 {now_chars} 字符（保留最近 4 条完整消息）")
                     # 压缩后清除持久化，只保存最近完整消息 + 新摘要
                     if self.session_id:
                         self.store.clear_messages(self.session_id)
                         # 重写当前 history（去掉 system）
                         for m in self.history[1:]:
-                            self.store.append(self.session_id, m["role"], m.get("content", ""),
-                                              m.get("tool_calls"))
+                            self.store.append(
+                                self.session_id, m["role"], m.get("content", ""), m.get("tool_calls")
+                            )
             except RuntimeError as e:
                 print(f"[ERROR] {e}")
                 self.history.pop()
@@ -279,7 +350,7 @@ class AgentDemoApp:
             for i, s in enumerate(sessions, 1):
                 mode_tag = f"[{s.mode}]" if s.mode != "chat" else ""
                 print(f"   {i}. {s.title} {mode_tag} ({self.store.count_messages(s.id)} 条消息)")
-            print(f"   n. 新建会话")
+            print("   n. 新建会话")
 
             while True:
                 choice = input("\n选择会话编号直接恢复，或按 Enter / n 新建: ").strip().lower()
@@ -290,10 +361,11 @@ class AgentDemoApp:
                     if 0 <= idx < len(sessions):
                         sid = sessions[idx].id
                         saved = self.store.load_messages(sid)
-                        print(f"\n✅ 已恢复会话「{sessions[idx].title}」"
-                              f"（{len(saved)} 条历史消息）")
+                        print(f"\n✅ 已恢复会话「{sessions[idx].title}」（{len(saved)} 条历史消息）")
                         # 恢复时把 system prompt + 历史消息拼回去
-                        self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}] + saved
+                        self.history = [
+                            {"role": "system", "content": build_system_prompt(self.skill_registry)}
+                        ] + saved
                         self.session_id = sid
                         return
                 except ValueError:
@@ -304,7 +376,7 @@ class AgentDemoApp:
         sid = self.store.create_session(title="新会话", mode="chat")
         self.session_id = sid
         print(f"\n✨ 已创建新会话（ID: {sid}）")
-        print(f"   提示：输入 /sessions 管理历史，输入 /save 手动保存当前标题")
+        print("   提示：输入 /sessions 管理历史，输入 /save 手动保存当前标题")
 
     def _try_session_command(self, text: str) -> str | None:
         """
@@ -344,8 +416,7 @@ class AgentDemoApp:
                 for i, s in enumerate(sessions, 1):
                     cur_tag = " ← 当前" if s.id == self.session_id else ""
                     mode_tag = f"[{s.mode}]" if s.mode != "chat" else ""
-                    print(f"   {i}. {s.title} {mode_tag} "
-                          f"({self.store.count_messages(s.id)} 条){cur_tag}")
+                    print(f"   {i}. {s.title} {mode_tag} ({self.store.count_messages(s.id)} 条){cur_tag}")
             return ""
         elif cmd == "/load":
             sessions = self.store.list_sessions(limit=20)
@@ -358,7 +429,9 @@ class AgentDemoApp:
                     sid = sessions[idx].id
                     saved = self.store.load_messages(sid)
                     print(f"  ✅ 已加载「{sessions[idx].title}」（{len(saved)} 条消息）")
-                    self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}] + saved
+                    self.history = [
+                        {"role": "system", "content": build_system_prompt(self.skill_registry)}
+                    ] + saved
                     self.session_id = sid
                     return ""
             except ValueError:
@@ -400,8 +473,10 @@ class AgentDemoApp:
                         self.store.delete_session(sid)
                         if sid == self.session_id:
                             self.session_id = None
-                            self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}]
-                        print(f"  🗑️ 已删除")
+                            self.history = [
+                                {"role": "system", "content": build_system_prompt(self.skill_registry)}
+                            ]
+                        print("  🗑️ 已删除")
                     else:
                         print("  已取消")
                     return ""
@@ -433,5 +508,20 @@ class AgentDemoApp:
             return ""
 
 
+def main(argv: list[str] | None = None) -> None:
+    """CLI entry point with explicit opt-in for dangerous local tools."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="本地 AI Agent 交互式演示")
+    parser.add_argument(
+        "--enable-dangerous-tools",
+        action="store_true",
+        default=None,
+        help="允许 run_code/run_terminal，并在每次执行前要求确认",
+    )
+    args = parser.parse_args(argv)
+    AgentDemoApp(enable_dangerous_tools=args.enable_dangerous_tools).run()
+
+
 if __name__ == "__main__":
-    AgentDemoApp().run()
+    main()

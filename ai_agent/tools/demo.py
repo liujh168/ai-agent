@@ -1,4 +1,5 @@
 """演示类工具：天气、计算器"""
+
 import ast
 import operator
 
@@ -19,8 +20,8 @@ def calculator(expression: str) -> str:
     执行简单数学计算（AST 白名单，杜绝 eval 任意代码执行）。
     支持整数/浮点数 + - * / ** % 运算，以及括号和一元负号。
     """
-    import ast
-    import operator
+    if len(expression) > 200:
+        return "计算错误: 表达式过长（最多 200 字符）"
 
     _ALLOWED_OPS = {
         ast.Add: operator.add,
@@ -39,7 +40,11 @@ def calculator(expression: str) -> str:
             op_type = type(node.op)
             if op_type not in _ALLOWED_OPS:
                 raise ValueError(f"不支持的运算符: {op_type.__name__}")
-            return _ALLOWED_OPS[op_type](_safe_eval(node.left), _safe_eval(node.right))
+            left = _safe_eval(node.left)
+            right = _safe_eval(node.right)
+            if op_type is ast.Pow and abs(right) > 1000:
+                raise ValueError("指数绝对值不能超过 1000")
+            return _ALLOWED_OPS[op_type](left, right)
         if isinstance(node, ast.UnaryOp):
             op_type = type(node.op)
             if op_type not in _ALLOWED_OPS:
@@ -59,4 +64,3 @@ def calculator(expression: str) -> str:
         return f"语法错误: {e}"
     except Exception as e:
         return f"计算错误: {e}"
-

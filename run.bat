@@ -37,11 +37,12 @@ if not exist .venv\Scripts\python.exe (
         exit /b 1
     )
     call .venv\Scripts\activate.bat
+    python -m pip install --upgrade pip
     echo  📥 安装依赖（首次较慢，约 1-3 分钟）...
-    pip install -r requirements.txt --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    python -m pip install -r requirements.txt --index-url https://pypi.tuna.tsinghua.edu.cn/simple
     if errorlevel 1 (
         echo     清华镜像失败，重试官方源...
-        pip install -r requirements.txt
+        python -m pip install -r requirements.txt
     )
 ) else (
     call .venv\Scripts\activate.bat

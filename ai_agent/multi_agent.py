@@ -28,7 +28,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 log = logging.getLogger("Agent")
 
@@ -85,11 +85,13 @@ ROLE_PROMPTS = {
 # 角色调用器
 # ============================================================
 
+
 @dataclass
 class RoleCall:
     """角色间的一次消息传递"""
-    from_role: str          # planner / executor / critic / user
-    to_role: str            # planner / executor / critic
+
+    from_role: str  # planner / executor / critic / user
+    to_role: str  # planner / executor / critic
     content: str
     timestamp: str = ""
 
@@ -112,6 +114,7 @@ def _parse_critic_decision(text: str) -> bool:
 def _parse_subtasks(plan_text: str) -> list[str]:
     """从 Planner 输出中提取子任务清单"""
     import re
+
     # 匹配「数字. xxx」或「数字、xxx」
     items = re.findall(r"^\s*\d+[.、)]\s*(.+)$", plan_text, re.MULTILINE)
     return [i.strip() for i in items if i.strip()]
@@ -120,6 +123,7 @@ def _parse_subtasks(plan_text: str) -> list[str]:
 # ============================================================
 # 多 Agent 协作主流程
 # ============================================================
+
 
 def run_multi_agent(
     client,  # LMStudioClient 实例
@@ -140,6 +144,7 @@ def run_multi_agent(
     返回:
         最终汇总的执行结果字符串
     """
+
     def _emit(line: str) -> None:
         if trace_callback is not None:
             trace_callback(line)
@@ -149,12 +154,12 @@ def run_multi_agent(
     separator = "\n" + "=" * 50 + "\n"
 
     _emit(f"\n{separator}")
-    _emit(f"🤝 多 Agent 协作启动（Planner + Executor + Critic）")
+    _emit("🤝 多 Agent 协作启动（Planner + Executor + Critic）")
     _emit(f"📋 用户任务: {user_task}")
     _emit(separator)
 
     # ---------- Phase 1: Planner 出计划 ----------
-    _emit(f"\n👤 [Planner] 正在规划...")
+    _emit("\n👤 [Planner] 正在规划...")
     planner_msgs = [
         {"role": "system", "content": ROLE_PROMPTS["planner"]},
         {"role": "user", "content": f"请为下面的任务制定执行计划：\n\n{user_task}"},
@@ -165,7 +170,7 @@ def run_multi_agent(
     subtasks = _parse_subtasks(plan_text)
     if not subtasks:
         subtasks = [plan_text.strip()]
-        _emit(f"\n[WARN] 未能解析出子任务清单，将整个计划作为一个子任务执行")
+        _emit("\n[WARN] 未能解析出子任务清单，将整个计划作为一个子任务执行")
     _emit(f"\n🔍 解析到 {len(subtasks)} 个子任务:")
     for i, st in enumerate(subtasks, 1):
         _emit(f"   {i}. {st[:50]}{'…' if len(st) > 50 else ''}")
@@ -175,31 +180,37 @@ def run_multi_agent(
         _emit(f"\n🔄 [第 {round_num} 轮] Critic 评审计划...")
         critic_msgs = [
             {"role": "system", "content": ROLE_PROMPTS["critic"]},
-            {"role": "user", "content": (
-                f"请评审 Planner 的执行计划。\n\n"
-                f"【原始任务】\n{user_task}\n\n"
-                f"【Planner 的计划】\n{plan_text}\n\n"
-                f"【提取的子任务清单】\n"
-                + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(subtasks))
-                + "\n\n请给出评审结论。"
-            )},
+            {
+                "role": "user",
+                "content": (
+                    f"请评审 Planner 的执行计划。\n\n"
+                    f"【原始任务】\n{user_task}\n\n"
+                    f"【Planner 的计划】\n{plan_text}\n\n"
+                    f"【提取的子任务清单】\n"
+                    + "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(subtasks))
+                    + "\n\n请给出评审结论。"
+                ),
+            },
         ]
         critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=512)
         _emit(f"\n📝 Critic 评审:\n{critic_reply}")
 
         if _parse_critic_decision(critic_reply):
-            _emit(f"\n✅ Critic 通过了 Planner 的计划！")
+            _emit("\n✅ Critic 通过了 Planner 的计划！")
             break
 
-        _emit(f"\n❌ Critic 不通过，让 Planner 根据批评意见重规划...")
+        _emit("\n❌ Critic 不通过，让 Planner 根据批评意见重规划...")
         planner_msgs = [
             {"role": "system", "content": ROLE_PROMPTS["planner"]},
             {"role": "user", "content": f"请为下面的任务制定执行计划：\n\n{user_task}"},
             {"role": "assistant", "content": plan_text},
-            {"role": "user", "content": (
-                f"Critic 的评审意见（不通过）：\n\n{critic_reply}\n\n"
-                "请根据以上批评意见重新规划，输出完整的新计划。"
-            )},
+            {
+                "role": "user",
+                "content": (
+                    f"Critic 的评审意见（不通过）：\n\n{critic_reply}\n\n"
+                    "请根据以上批评意见重新规划，输出完整的新计划。"
+                ),
+            },
         ]
         plan_text = client.chat(planner_msgs, temperature=temperature, max_tokens=512)
         subtasks = _parse_subtasks(plan_text) or [plan_text.strip()]
@@ -218,12 +229,15 @@ def run_multi_agent(
 
         executor_msgs = [
             {"role": "system", "content": ROLE_PROMPTS["executor"]},
-            {"role": "user", "content": (
-                f"整体任务回顾：{user_task}\n"
-                f"已完成的前序子任务产出：\n{accumulated_context}\n"
-                f"当前子任务：{i}. {subtask}\n\n"
-                "请完成这个子任务，输出具体成果。"
-            )},
+            {
+                "role": "user",
+                "content": (
+                    f"整体任务回顾：{user_task}\n"
+                    f"已完成的前序子任务产出：\n{accumulated_context}\n"
+                    f"当前子任务：{i}. {subtask}\n\n"
+                    "请完成这个子任务，输出具体成果。"
+                ),
+            },
         ]
         exec_output = client.chat(executor_msgs, temperature=temperature, max_tokens=max_tokens)
         _emit(f"\n📄 Executor 子任务 {i} 产出:\n{exec_output[:300]}{'…' if len(exec_output) > 300 else ''}")
@@ -232,13 +246,16 @@ def run_multi_agent(
             _emit(f"\n🔍 Critic 评审子任务 {i} 产出（第 {round_num} 轮）...")
             critic_msgs = [
                 {"role": "system", "content": ROLE_PROMPTS["critic"]},
-                {"role": "user", "content": (
-                    f"请评审 Executor 对「子任务 {i}: {subtask}」的执行产出。\n\n"
-                    f"【整体任务】{user_task}\n"
-                    f"【当前子任务】{subtask}\n"
-                    f"【Executor 产出】\n{exec_output}\n\n"
-                    "请给出评审结论。"
-                )},
+                {
+                    "role": "user",
+                    "content": (
+                        f"请评审 Executor 对「子任务 {i}: {subtask}」的执行产出。\n\n"
+                        f"【整体任务】{user_task}\n"
+                        f"【当前子任务】{subtask}\n"
+                        f"【Executor 产出】\n{exec_output}\n\n"
+                        "请给出评审结论。"
+                    ),
+                },
             ]
             critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=512)
             _emit(f"   Critic: {critic_reply[:200]}{'…' if len(critic_reply) > 200 else ''}")
@@ -246,15 +263,18 @@ def run_multi_agent(
             if _parse_critic_decision(critic_reply):
                 _emit(f"   ✅ Critic 通过了子任务 {i}")
                 break
-            _emit(f"   ❌ Critic 不通过，让 Executor 根据批评意见修正...")
+            _emit("   ❌ Critic 不通过，让 Executor 根据批评意见修正...")
             executor_msgs = [
                 {"role": "system", "content": ROLE_PROMPTS["executor"]},
-                {"role": "user", "content": (
-                    f"整体任务：{user_task}\n当前子任务：{i}. {subtask}\n\n"
-                    f"你之前的产出：\n{exec_output}\n\n"
-                    f"Critic 的批评意见（不通过）：\n{critic_reply}\n\n"
-                    "请针对性修正，输出改进后的完整成果。"
-                )},
+                {
+                    "role": "user",
+                    "content": (
+                        f"整体任务：{user_task}\n当前子任务：{i}. {subtask}\n\n"
+                        f"你之前的产出：\n{exec_output}\n\n"
+                        f"Critic 的批评意见（不通过）：\n{critic_reply}\n\n"
+                        "请针对性修正，输出改进后的完整成果。"
+                    ),
+                },
             ]
             exec_output = client.chat(executor_msgs, temperature=temperature, max_tokens=max_tokens)
             _emit(f"   Executor 修正后产出: {exec_output[:200]}…")
@@ -281,11 +301,14 @@ def run_multi_agent(
 
     final_integrate_msgs = [
         {"role": "system", "content": ROLE_PROMPTS["planner"]},
-        {"role": "user", "content": (
-            f"以下是针对任务「{user_task}」的 {len(subtasks)} 个子任务执行产出，"
-            "请整合为一份连贯的最终交付物给用户。可以调整结构、合并相关内容，"
-            "但不要丢弃任何关键成果。\n\n" + final_summary
-        )},
+        {
+            "role": "user",
+            "content": (
+                f"以下是针对任务「{user_task}」的 {len(subtasks)} 个子任务执行产出，"
+                "请整合为一份连贯的最终交付物给用户。可以调整结构、合并相关内容，"
+                "但不要丢弃任何关键成果。\n\n" + final_summary
+            ),
+        },
     ]
     integrated = client.chat(final_integrate_msgs, temperature=temperature, max_tokens=max_tokens)
 

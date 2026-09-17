@@ -25,31 +25,34 @@ ai_agent.mcp_client — 极简 MCP HTTP/Streamable HTTP 客户端
 from __future__ import annotations
 
 import json
+import re
 import threading
-import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 import requests
-
 
 # ============================================================
 # 数据结构
 # ============================================================
 
+
 @dataclass
 class MCPTool:
     """MCP Server 返回的工具描述"""
+
     name: str
     description: str = ""
     input_schema: dict = field(default_factory=dict)
-    server_url: str = ""          # 来源 server
-    server_index: int = 0          # MCPManager 内部索引
+    server_url: str = ""  # 来源 server
+    server_index: int = 0  # MCPManager 内部索引
 
 
 @dataclass
 class MCPError:
     """MCP 协议级错误"""
+
     code: int
     message: str
     data: Any = None
@@ -62,13 +65,20 @@ class MCPError:
 # 单个 Server 的客户端
 # ============================================================
 
+
 class MCPClient:
     """连接到一个 MCP Server（Streamable HTTP）"""
 
-    def __init__(self, url: str, timeout: float = 15.0,
-                 extra_headers: Optional[dict] = None):
+    def __init__(
+        self,
+        url: str,
+        timeout: float = 15.0,
+        extra_headers: dict | None = None,
+        protocol_version: str = "2025-06-18",
+    ):
         self.url = url.rstrip("/")
         self.timeout = timeout
+        self.protocol_version = protocol_version
         self.headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
@@ -77,7 +87,7 @@ class MCPClient:
         if extra_headers:
             self.headers.update(extra_headers)
 
-        self._session_id: Optional[str] = None   # MCP Streamable HTTP 会话
+        self._session_id: str | None = None  # MCP Streamable HTTP 会话
         self._request_id: int = 0
         self._lock = threading.Lock()
         self._connected: bool = False
@@ -86,7 +96,7 @@ class MCPClient:
 
     # ---------- 底层 JSON-RPC ----------
 
-    def _send(self, method: str, params: Optional[dict] = None) -> Any:
+    def _send(self, method: str, params: dict | None = None) -> Any:
         """发送一个 JSON-RPC 请求，返回 result 或抛 MCPError / requests 异常"""
         with self._lock:
             self._request_id += 1
@@ -103,6 +113,8 @@ class MCPClient:
         hdrs = dict(self.headers)
         if self._session_id:
             hdrs["Mcp-Session-Id"] = self._session_id
+        if self.protocol_version:
+            hdrs["Mcp-Protocol-Version"] = self.protocol_version
 
         try:
             resp = requests.post(
@@ -119,21 +131,13 @@ class MCPClient:
         if new_sid:
             self._session_id = new_sid
 
-        if resp.status_code != 200:
+        if resp.status_code not in (200, 202, 204):
             raise MCPError(
                 code=resp.status_code,
                 message=f"HTTP {resp.status_code}: {resp.text[:200]}",
             )
 
-        # 解析 JSON-RPC 响应
-        text = resp.text.strip()
-        if not text:
-            raise MCPError(code=-1, message="空响应")
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            raise MCPError(code=-1, message=f"非 JSON 响应: {text[:200]}")
+        data = self._parse_response(resp)
 
         # SSE 格式会有多行（data: {...}），取第一条完整 JSON-RPC
         if isinstance(data, list):
@@ -149,23 +153,77 @@ class MCPClient:
 
         return data.get("result")
 
+    def _notify(self, method: str, params: dict | None = None) -> None:
+        """Send a JSON-RPC notification without an id."""
+        hdrs = dict(self.headers)
+        if self._session_id:
+            hdrs["Mcp-Session-Id"] = self._session_id
+        if self.protocol_version:
+            hdrs["Mcp-Protocol-Version"] = self.protocol_version
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+        }
+        try:
+            resp = requests.post(
+                self.url,
+                data=json.dumps(payload),
+                headers=hdrs,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise MCPError(code=-1, message=f"HTTP notification 失败: {exc}") from exc
+        new_sid = resp.headers.get("Mcp-Session-Id")
+        if new_sid:
+            self._session_id = new_sid
+        if resp.status_code not in (200, 202, 204):
+            raise MCPError(
+                code=resp.status_code,
+                message=f"notification HTTP {resp.status_code}: {resp.text[:200]}",
+            )
+
+    @staticmethod
+    def _parse_response(resp) -> dict:
+        text = resp.text.strip()
+        if not text:
+            return {}
+        content_type = resp.headers.get("Content-Type", "")
+        if "text/event-stream" in content_type or text.startswith(("event:", "data:")):
+            for line in text.splitlines():
+                if line.startswith("data:"):
+                    payload = line[5:].strip()
+                    if not payload:
+                        continue
+                    try:
+                        return json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+            raise MCPError(code=-1, message=f"无法解析 SSE 响应: {text[:200]}")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise MCPError(code=-1, message=f"非 JSON 响应: {text[:200]}") from exc
+
     # ---------- 高层 API ----------
 
     def initialize(self) -> dict:
         """MCP 初始化握手"""
-        result = self._send("initialize", {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {"name": "ai-agent", "version": "1.0"},
-        })
+        result = self._send(
+            "initialize",
+            {
+                "protocolVersion": self.protocol_version,
+                "capabilities": {},
+                "clientInfo": {"name": "ai-agent", "version": "1.0"},
+            },
+        )
         self._connected = True
         self._server_info = result or {}
+        negotiated = self._server_info.get("protocolVersion")
+        if negotiated:
+            self.protocol_version = str(negotiated)
 
-        # 初始化通知（可选，某些 server 期望收到）
-        try:
-            self._send("notifications/initialized", {})
-        except Exception:
-            pass  # 某些 server 对 notification 的响应不规范
+        self._notify("notifications/initialized", {})
 
         return self._server_info
 
@@ -179,24 +237,30 @@ class MCPClient:
 
         tools: list[MCPTool] = []
         for t in raw_tools:
-            tools.append(MCPTool(
-                name=t["name"],
-                description=t.get("description", ""),
-                input_schema=t.get("inputSchema", {"type": "object", "properties": {}}),
-                server_url=self.url,
-            ))
+            tools.append(
+                MCPTool(
+                    name=t["name"],
+                    description=t.get("description", ""),
+                    input_schema=t.get("inputSchema", {"type": "object", "properties": {}}),
+                    server_url=self.url,
+                )
+            )
         self._tools = tools
         return tools
 
-    def call_tool(self, name: str, arguments: Optional[dict] = None) -> str:
+    def call_tool(self, name: str, arguments: dict | None = None) -> str:
         """调用一个 MCP 工具，返回字符串结果"""
         if not self._connected:
             self.initialize()
 
-        result = self._send("tools/call", {
-            "name": name,
-            "arguments": arguments or {},
-        })
+        result = self._send(
+            "tools/call",
+            {
+                "name": name,
+                "arguments": arguments or {},
+            },
+        )
+        is_error = bool((result or {}).get("isError"))
 
         # MCP 返回的 content 是 list，每个元素有 type + text
         contents = (result or {}).get("content", [])
@@ -208,7 +272,8 @@ class MCPClient:
                 # image / blob 等类型，先输出类型占位
                 parts.append(f"[{c.get('type', 'unknown')}: {str(c)[:200]}]")
 
-        return "\n".join(parts) if parts else "(无输出)"
+        content = "\n".join(parts) if parts else "(无输出)"
+        return f"[MCP 工具错误] {content}" if is_error else content
 
     def ping(self) -> bool:
         """健康检查"""
@@ -222,10 +287,27 @@ class MCPClient:
     def connected(self) -> bool:
         return self._connected
 
+    def close(self) -> None:
+        """Best-effort MCP Streamable HTTP session termination."""
+        if not self._session_id:
+            return
+        headers = dict(self.headers)
+        headers["Mcp-Session-Id"] = self._session_id
+        if self.protocol_version:
+            headers["Mcp-Protocol-Version"] = self.protocol_version
+        try:
+            requests.delete(self.url, headers=headers, timeout=self.timeout)
+        except requests.RequestException:
+            pass
+        finally:
+            self._session_id = None
+            self._connected = False
+
 
 # ============================================================
 # 多 Server 管理器
 # ============================================================
+
 
 class MCPManager:
     """管理多个 MCP Server，合并工具，桥接到本地 tool_map"""
@@ -247,10 +329,12 @@ class MCPManager:
                 client._server_index = idx
 
                 for t in tools:
-                    # 命名冲突：如果本地有同名工具，加 mcp_ 前缀
-                    final_name = t.name
-                    if final_name in self._tool_names:
-                        final_name = f"mcp_{t.name}"
+                    safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", t.name)
+                    final_name = f"mcp_{idx}_{safe_name}"
+                    suffix = 2
+                    while final_name in self._tool_names:
+                        final_name = f"mcp_{idx}_{safe_name}_{suffix}"
+                        suffix += 1
                     self._tool_names[final_name] = (idx, t.name)
                     t.server_index = idx
                     t.name = final_name
@@ -271,14 +355,16 @@ class MCPManager:
             if client is None:
                 continue
             for tool in client._tools:
-                schemas.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or f"MCP 工具: {tool.name}",
-                        "parameters": tool.input_schema or {"type": "object", "properties": {}},
-                    },
-                })
+                schemas.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description or f"MCP 工具: {tool.name}",
+                            "parameters": tool.input_schema or {"type": "object", "properties": {}},
+                        },
+                    }
+                )
         self._tool_schemas = schemas
 
     # ---------- 对外 API ----------
@@ -313,6 +399,7 @@ class MCPManager:
                         return f"[MCP 错误] {e}"
                     except Exception as e:
                         return f"[MCP 调用异常] {type(e).__name__}: {e}"
+
                 fn.__name__ = final_name
                 fn.__doc__ = f"MCP tool from {c.url}: {orig}"
                 return fn
@@ -330,7 +417,8 @@ class MCPManager:
 # 工厂函数（可选依赖保护）
 # ============================================================
 
-def create_mcp_manager(server_urls: list[str]) -> Optional[MCPManager]:
+
+def create_mcp_manager(server_urls: list[str]) -> MCPManager | None:
     """安全创建 MCPManager：空列表返回 None，连接失败也返回可用实例（0 工具）"""
     if not server_urls:
         return None

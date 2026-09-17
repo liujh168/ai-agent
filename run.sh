@@ -25,9 +25,10 @@ if [ ! -f ".venv/bin/python" ]; then
     echo " 📦 首次运行，创建虚拟环境..."
     python3 -m venv .venv
     source .venv/bin/activate
+    python -m pip install --upgrade pip
     echo " 📥 安装依赖（首次较慢）..."
-    pip install -r requirements.txt --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
-        || pip install -r requirements.txt
+    python -m pip install -r requirements.txt --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+        || python -m pip install -r requirements.txt
 else
     source .venv/bin/activate
 fi

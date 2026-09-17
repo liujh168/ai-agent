@@ -1,8 +1,2 @@
-# 开发 / 测试依赖（与运行时 requirements.txt 分离）
-# 安装：pip install -r requirements-dev.txt
-
-# 单元测试
-pytest~=8.0.0
-
-# 可选：未配置 BOCHA_API_KEY 时的 DuckDuckGo 网络搜索降级
-# ddgs~=6.0.0
+-r requirements-dev.lock
+-e .

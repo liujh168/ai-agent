@@ -23,11 +23,10 @@
 import json
 import os
 import sqlite3
+import threading
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
-from typing import Optional
-
+from dataclasses import dataclass
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ai_agent_history.db")
 
@@ -35,9 +34,10 @@ DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ai_a
 @dataclass
 class Session:
     """会话元数据"""
+
     id: str
     title: str
-    mode: str = "chat"          # chat / react / reflexion / multi_agent / ...
+    mode: str = "chat"  # chat / react / reflexion / multi_agent / ...
     created_at: int = 0
     updated_at: int = 0
 
@@ -47,9 +47,13 @@ class ChatStore:
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
+        self._lock = threading.RLock()
         self._ensure_dir()
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("PRAGMA busy_timeout = 5000")
+        self.conn.execute("PRAGMA journal_mode = WAL")
         self._init_schema()
 
     def _ensure_dir(self) -> None:
@@ -58,101 +62,128 @@ class ChatStore:
             os.makedirs(d, exist_ok=True)
 
     def _init_schema(self) -> None:
-        cur = self.conn.cursor()
-        cur.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS sessions (
-                id          TEXT PRIMARY KEY,
-                title       TEXT NOT NULL DEFAULT '新会话',
-                mode        TEXT NOT NULL DEFAULT 'chat',
-                created_at  INTEGER NOT NULL,
-                updated_at  INTEGER NOT NULL
-            );
+        with self._lock:
+            cur = self.conn.cursor()
+            cur.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id          TEXT PRIMARY KEY,
+                    title       TEXT NOT NULL DEFAULT '新会话',
+                    mode        TEXT NOT NULL DEFAULT 'chat',
+                    created_at  INTEGER NOT NULL,
+                    updated_at  INTEGER NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS messages (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id  TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                content     TEXT NOT NULL,
-                tool_calls  TEXT,
-                timestamp   INTEGER NOT NULL,
-                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-            );
+                CREATE TABLE IF NOT EXISTS messages (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id  TEXT NOT NULL,
+                    role        TEXT NOT NULL,
+                    content     TEXT NOT NULL,
+                    tool_calls  TEXT,
+                    timestamp   INTEGER NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
-            """
-        )
-        self.conn.commit()
+                CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+                DELETE FROM messages
+                WHERE session_id NOT IN (SELECT id FROM sessions);
+                """
+            )
+            self.conn.commit()
 
     # ---------- Session 级 ----------
 
-    def create_session(self, title: str = "新会话", mode: str = "chat", session_id: Optional[str] = None) -> str:
+    def create_session(self, title: str = "新会话", mode: str = "chat", session_id: str | None = None) -> str:
         """创建新会话，返回 session_id"""
         sid = session_id or uuid.uuid4().hex[:12]
         now = int(time.time())
-        self.conn.execute(
-            "INSERT INTO sessions(id, title, mode, created_at, updated_at) VALUES(?, ?, ?, ?, ?)",
-            (sid, title, mode, now, now),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO sessions(id, title, mode, created_at, updated_at) VALUES(?, ?, ?, ?, ?)",
+                (sid, title, mode, now, now),
+            )
+            self.conn.commit()
         return sid
 
-    def get_session(self, session_id: str) -> Optional[Session]:
-        row = self.conn.execute(
-            "SELECT * FROM sessions WHERE id = ?", (session_id,)
-        ).fetchone()
+    def get_session(self, session_id: str) -> Session | None:
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if not row:
             return None
-        return Session(id=row["id"], title=row["title"], mode=row["mode"],
-                       created_at=row["created_at"], updated_at=row["updated_at"])
+        return Session(
+            id=row["id"],
+            title=row["title"],
+            mode=row["mode"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
     def list_sessions(self, limit: int = 50) -> list[Session]:
         """按 updated_at 倒序列出会话"""
-        rows = self.conn.execute(
-            "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)
+            ).fetchall()
         return [Session(**dict(r)) for r in rows]
 
     def rename_session(self, session_id: str, title: str) -> bool:
-        cur = self.conn.execute(
-            "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
-            (title, int(time.time()), session_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (title, int(time.time()), session_id),
+            )
+            self.conn.commit()
         return cur.rowcount > 0
 
     def delete_session(self, session_id: str) -> bool:
-        cur = self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        # SQLite ON DELETE CASCADE 会自动删 messages
-        self.conn.commit()
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            self.conn.commit()
         return cur.rowcount > 0
 
     def touch_session(self, session_id: str) -> None:
         """更新 updated_at 时间戳"""
-        self.conn.execute(
-            "UPDATE sessions SET updated_at = ? WHERE id = ?",
-            (int(time.time()), session_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                (int(time.time()), session_id),
+            )
+            self.conn.commit()
+
+    def set_session_mode(self, session_id: str, mode: str) -> bool:
+        """Update the mode marker for an existing session."""
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE sessions SET mode = ?, updated_at = ? WHERE id = ?",
+                (mode, int(time.time()), session_id),
+            )
+            self.conn.commit()
+        return cur.rowcount > 0
 
     # ---------- Message 级 ----------
 
-    def append(self, session_id: str, role: str, content: str,
-               tool_calls: Optional[list] = None) -> None:
+    def append(self, session_id: str, role: str, content: str, tool_calls: list | None = None) -> None:
         """追加一条消息到指定会话，同时更新 session 的 updated_at"""
         tool_json = json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None
-        self.conn.execute(
-            "INSERT INTO messages(session_id, role, content, tool_calls, timestamp) VALUES(?, ?, ?, ?, ?)",
-            (session_id, role, content, tool_json, int(time.time())),
-        )
-        self.touch_session(session_id)
+        now = int(time.time())
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO messages(session_id, role, content, tool_calls, timestamp) VALUES(?, ?, ?, ?, ?)",
+                (session_id, role, content, tool_json, now),
+            )
+            self.conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                (now, session_id),
+            )
+            self.conn.commit()
 
     def load_messages(self, session_id: str, include_system: bool = False) -> list[dict]:
         """加载会话的全部消息 → [{"role": ..., "content": ...}, ...]"""
-        rows = self.conn.execute(
-            "SELECT role, content, tool_calls FROM messages WHERE session_id = ? ORDER BY timestamp ASC",
-            (session_id,),
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT role, content, tool_calls FROM messages WHERE session_id = ? ORDER BY id ASC",
+                (session_id,),
+            ).fetchall()
         msgs = []
         for r in rows:
             entry = {"role": r["role"], "content": r["content"]}
@@ -167,15 +198,21 @@ class ChatStore:
         return msgs
 
     def count_messages(self, session_id: str) -> int:
-        row = self.conn.execute(
-            "SELECT COUNT(*) as c FROM messages WHERE session_id = ?", (session_id,)
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as c FROM messages WHERE session_id = ?", (session_id,)
+            ).fetchone()
         return row["c"]
 
     def clear_messages(self, session_id: str) -> None:
         """清空会话的所有消息（保留会话本身）"""
-        self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-        self.touch_session(session_id)
+        with self._lock:
+            self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            self.conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                (int(time.time()), session_id),
+            )
+            self.conn.commit()
 
     # ---------- 便捷封装 ----------
 
@@ -185,10 +222,11 @@ class ChatStore:
         self.rename_session(session_id, title)
 
     def close(self) -> None:
-        try:
-            self.conn.close()
-        except Exception:
-            pass
+        with self._lock:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
 
     def __enter__(self):
         return self

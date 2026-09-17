@@ -21,40 +21,45 @@ Agent 评测集框架 — Agentic Eval Harness
 from __future__ import annotations
 
 import argparse
-import json
 import os
+import shutil
 import sys
+import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
-
 
 # ============================================================
 # 数据结构
 # ============================================================
 
+
 @dataclass
 class EvalCase:
     """一条评测用例"""
-    name: str                           # 用例名（唯一）
-    capability: str                     # 所属能力标签：chat / react / reasoning / rag / code / sql / tool_routing / ...
-    prompt: str                         # 用户输入（自然语言）
-    expected_tool: str | None = None    # 期望主工具调用（用于验证路由正确性）
-    expected_tools_called: list[str] = field(default_factory=list)  # 期望完整工具调用序列（顺序敏感，用于 ReAct/规划）
-    expected_contains: list[str] = field(default_factory=list)      # 最终输出应包含的关键词（全部满足才算 pass）
+
+    name: str  # 用例名（唯一）
+    capability: str  # 所属能力标签：chat / react / reasoning / rag / code / sql / tool_routing / ...
+    prompt: str  # 用户输入（自然语言）
+    expected_tool: str | None = None  # 期望主工具调用（用于验证路由正确性）
+    expected_tools_called: list[str] = field(
+        default_factory=list
+    )  # 期望完整工具调用序列（顺序敏感，用于 ReAct/规划）
+    expected_contains: list[str] = field(default_factory=list)  # 最终输出应包含的关键词（全部满足才算 pass）
     expected_not_contains: list[str] = field(default_factory=list)  # 最终输出不应包含的关键词
-    expected_min_len: int = 0           # 最终输出最少字符数（>0 时生效，用于确保非空）
-    description: str = ""               # 用例说明
+    expected_min_len: int = 0  # 最终输出最少字符数（>0 时生效，用于确保非空）
+    description: str = ""  # 用例说明
 
 
 @dataclass
 class EvalResult:
     """单条评测结果"""
+
     case: EvalCase
     passed: bool
-    reason: str                         # pass 或 fail 的原因说明
+    reason: str  # pass 或 fail 的原因说明
     tools_called: list[str] = field(default_factory=list)  # 实际工具调用序列
-    output_preview: str = ""            # 最终输出截断预览
+    output_preview: str = ""  # 最终输出截断预览
     elapsed: float = 0.0
 
 
@@ -103,7 +108,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_contains=["北京", "上海", "深圳"],
         description="模型应路由到 sql_query，demo 模式下 users 表已含 5 条样本",
     ),
-
     # ---------- 能力：普通对话 ----------
     EvalCase(
         name="chat_simple",
@@ -114,7 +118,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_min_len=20,  # 至少有 20 字符的非空回复（不是报错或幻想工具）
         description="普通聊天不应触发工具调用，且应有正常文本回复",
     ),
-
     # ---------- 能力：Few-shot Prompt Engineering ----------
     EvalCase(
         name="few_shot_sentiment",
@@ -123,17 +126,15 @@ EVAL_CASES: list[EvalCase] = [
         expected_tool="demo_few_shot",
         description="模型应调用 demo_few_shot 并输出情感分类结果",
     ),
-
     # ---------- 能力：结构化输出 ----------
     EvalCase(
         name="structured_extract_basic",
         capability="structured",
-        prompt='从这段文字提取结构化信息：小明25岁住北京（姓名,年龄,城市）',
+        prompt="从这段文字提取结构化信息：小明25岁住北京（姓名,年龄,城市）",
         expected_tool="extract_structured",
         expected_contains=["小明", "25", "北京"],
         description="模型应路由到结构化提取工具，输出包含三个字段的 JSON",
     ),
-
     # ---------- 能力：ReAct（多步工具链） ----------
     EvalCase(
         name="react_multi_step",
@@ -142,7 +143,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_tool="demo_react",
         description="ReAct 应在多步推理中调用 get_weather（或 calculator），并展示 Thought 轨迹",
     ),
-
     # ---------- 能力：SQL 安全边界 ----------
     EvalCase(
         name="sql_security_drop_blocked",
@@ -153,7 +153,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_contains=[],  # 只验证没有执行成功，不要求特定拦截文本
         description="sql_query demo 模式应阻断 DDL/DML（或模型路由 human_confirm 拦截也算通过）",
     ),
-
     # ---------- 能力：计算器安全边界 ----------
     EvalCase(
         name="calculator_security_blocked",
@@ -165,7 +164,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_not_contains=["C:\\", "D:\\", "Program", "Windows", "Users"],  # 不应该返回文件路径
         description="AST 白名单应阻断任意代码执行——不应返回文件列表或路径",
     ),
-
     # ---------- 能力：反思 Reflexion ----------
     EvalCase(
         name="reflexion_iterative",
@@ -175,11 +173,9 @@ EVAL_CASES: list[EvalCase] = [
         expected_contains=["15"],
         description="Reflexion 应多轮迭代并给出正确答案 15",
     ),
-
     # ================================================================
     # Banner 示例补充（来自 main.py banner 13 个示例，去重后新增）
     # ================================================================
-
     # ---------- Banner 示例 6：终端命令 ----------
     EvalCase(
         name="banner_run_terminal",
@@ -188,7 +184,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_tool="run_terminal",
         description="模型应路由到 run_terminal 执行 PowerShell 命令",
     ),
-
     # ---------- Banner 示例 8：多模态图像识别 ----------
     EvalCase(
         name="banner_demo_vision",
@@ -197,7 +192,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_tool="demo_vision",
         description="多模态：模型应路由到 demo_vision 并返回图片中 'RAG' 最高",
     ),
-
     # ---------- Banner 示例 9：Planner-Executor 任务规划 ----------
     EvalCase(
         name="banner_plan_task",
@@ -206,7 +200,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_tool="plan_task",
         description="Planner-Executor 任务规划，子任务应完整列出来",
     ),
-
     # ---------- Banner 示例 10：思维链推理 CoT ----------
     EvalCase(
         name="banner_chain_of_thought",
@@ -216,7 +209,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_contains=["2", "赚"],
         description="CoT 推理：应直接在对话中给出正确答案 2 元，无需工具",
     ),
-
     # ---------- Banner 示例 11：ReAct 多步（天气+推荐） ----------
     EvalCase(
         name="banner_react_weather_book",
@@ -225,7 +217,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_tool="demo_react",
         description="ReAct 多步：先 get_weather，再 recommend_book，展示 Thought/Action/Observation",
     ),
-
     # ---------- Banner 示例 12：多 Agent 协作 ----------
     EvalCase(
         name="banner_multi_agent",
@@ -234,7 +225,6 @@ EVAL_CASES: list[EvalCase] = [
         expected_tool="run_multi_agent",
         description="多 Agent 协作：Planner 规划 → Executor 写文 → Critic 评审",
     ),
-
     # ---------- Banner 示例 13：流式对话 ----------
     EvalCase(
         name="banner_stream_chat",
@@ -253,6 +243,7 @@ _CAPABILITY_TAGS = sorted({c.capability for c in EVAL_CASES})
 # ============================================================
 # Tool Call Tracker — 包装 tool_map 记录调用序列
 # ============================================================
+
 
 class ToolCallTracker:
     """包装 tool_map，记录每次工具调用"""
@@ -286,21 +277,31 @@ class ToolCallTracker:
 # Evaluator — 逐条执行评测
 # ============================================================
 
+
 class Evaluator:
     """Agent 评测器"""
 
-    def __init__(self, client, system_prompt: str, tools: list[dict], tool_map: dict,
-                 max_iterations: int = 5):
+    def __init__(
+        self,
+        client,
+        system_prompt: str,
+        tools: list[dict],
+        tool_map: dict,
+        max_iterations: int = 5,
+        tool_executor=None,
+    ):
         self.client = client
         self.system_prompt = system_prompt
         self.tools = tools
         self.tool_map = tool_map
         self.max_iterations = max_iterations
+        self.tool_executor = tool_executor
 
-    def run(self, cases: list[EvalCase] | None = None, tag: str | None = None,
-            name_filter: str | None = None) -> list[EvalResult]:
+    def run(
+        self, cases: list[EvalCase] | None = None, tag: str | None = None, name_filter: str | None = None
+    ) -> list[EvalResult]:
         """运行评测，返回结果列表"""
-        cases = cases or EVAL_CASES
+        cases = EVAL_CASES if cases is None else cases
         if tag:
             cases = [c for c in cases if c.capability == tag]
         if name_filter:
@@ -309,9 +310,9 @@ class Evaluator:
             cases = [c for c in cases if any(n in c.name for n in names)]
 
         results: list[EvalResult] = []
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  🧪 Agent 评测集 — 共 {len(cases)} 条用例")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         for i, case in enumerate(cases, 1):
             print(f"\n[{i}/{len(cases)}] {case.name}  ({case.capability})")
@@ -329,6 +330,15 @@ class Evaluator:
     def _evaluate_one(self, case: EvalCase) -> EvalResult:
         tracker = ToolCallTracker(self.tool_map)
         tracked_map = tracker.build_tracked()
+        executor = self.tool_executor
+        if executor is not None:
+            from ai_agent.tooling import ToolExecutor
+
+            executor = ToolExecutor(
+                tracked_map,
+                policy=executor.policy,
+                confirm=executor.confirm,
+            )
 
         history = [
             {"role": "system", "content": self.system_prompt},
@@ -342,6 +352,7 @@ class Evaluator:
                 tools=self.tools,
                 tool_map=tracked_map,
                 max_iterations=self.max_iterations,
+                tool_executor=executor,
             )
         except Exception as e:
             elapsed = time.time() - t0
@@ -363,9 +374,7 @@ class Evaluator:
             if not tracker.calls:
                 failures.append(f"预期调用 {case.expected_tool}，但未调用任何工具")
             elif case.expected_tool not in tracker.calls:
-                failures.append(
-                    f"预期调用 {case.expected_tool}，实际调用序列: {' → '.join(tracker.calls)}"
-                )
+                failures.append(f"预期调用 {case.expected_tool}，实际调用序列: {' → '.join(tracker.calls)}")
 
         # 不应调用任何工具
         if case.expected_tool is None and tracker.calls:
@@ -378,10 +387,8 @@ class Evaluator:
         if case.expected_tools_called:
             actual = tracker.calls[:]
             expected = case.expected_tools_called
-            if len(expected) > len(actual) or actual[:len(expected)] != expected:
-                failures.append(
-                    f"预期工具序列 {expected}，实际 {actual}"
-                )
+            if len(expected) > len(actual) or actual[: len(expected)] != expected:
+                failures.append(f"预期工具序列 {expected}，实际 {actual}")
 
         # 3. 输出关键词检查
         for kw in case.expected_contains:
@@ -395,7 +402,9 @@ class Evaluator:
 
         # 5. 最少长度检查
         if case.expected_min_len > 0 and len(output or "") < case.expected_min_len:
-            failures.append(f"输出太短（{len(output or '')} 字符 < {case.expected_min_len}），应为正常文本回复")
+            failures.append(
+                f"输出太短（{len(output or '')} 字符 < {case.expected_min_len}），应为正常文本回复"
+            )
 
         passed = len(failures) == 0
         reason = "通过全部检查" if passed else "; ".join(failures)
@@ -415,10 +424,14 @@ class Evaluator:
         passed = sum(1 for r in results if r.passed)
         failed = total - passed
 
-        print(f"\n{'='*60}")
-        print(f"  📊 评测结果汇总")
-        print(f"{'='*60}")
-        print(f"  总计: {total}  条  |  ✅ 通过: {passed}  |  ❌ 失败: {failed}  |  通过率: {passed/total*100:.1f}%" if total else "  (无用例)")
+        print(f"\n{'=' * 60}")
+        print("  📊 评测结果汇总")
+        print(f"{'=' * 60}")
+        print(
+            f"  总计: {total}  条  |  ✅ 通过: {passed}  |  ❌ 失败: {failed}  |  通过率: {passed / total * 100:.1f}%"
+            if total
+            else "  (无用例)"
+        )
 
         # 按能力分组统计
         capability_stats: dict[str, tuple[int, int]] = {}
@@ -430,13 +443,13 @@ class Evaluator:
             capability_stats[cap] = (total_cap, passed_cap)
 
         if capability_stats:
-            print(f"\n  🎯 能力维度:")
+            print("\n  🎯 能力维度:")
             for cap, (t, p) in sorted(capability_stats.items()):
                 bar_len = 20
                 ratio = p / t if t else 0
                 filled = int(bar_len * ratio)
                 bar = "█" * filled + "░" * (bar_len - filled)
-                print(f"    {cap:<16s} {p}/{t}  {bar} {ratio*100:5.1f}%")
+                print(f"    {cap:<16s} {p}/{t}  {bar} {ratio * 100:5.1f}%")
 
         # 失败详情
         failures = [r for r in results if not r.passed]
@@ -548,14 +561,14 @@ class Evaluator:
 </head>
 <body>
 <h1>🤖 AI Agent 评测报告</h1>
-<p class="subtitle">共 {total} 条用例 · 生成于 {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+<p class="subtitle">共 {total} 条用例 · 生成于 {time.strftime("%Y-%m-%d %H:%M:%S")}</p>
 
 <div class="summary-bar"><div class="summary-fill" style="width:{pass_rate_pct:.1f}%"></div></div>
 
 <div class="cards">
   <div class="card total"><div class="card-label">总用例</div><div class="card-value">{total}</div></div>
   <div class="card passed"><div class="card-label">通过</div><div class="card-value">{passed}</div></div>
-  <div class="card failed"><div class="card-label">失败</div><div class="card-value">{data['failed']}</div></div>
+  <div class="card failed"><div class="card-label">失败</div><div class="card-value">{data["failed"]}</div></div>
   <div class="card rate"><div class="card-label">通过率</div><div class="card-value">{pass_rate_pct:.1f}%</div></div>
 </div>
 
@@ -581,14 +594,31 @@ class Evaluator:
 # CLI 入口
 # ============================================================
 
+
 def main() -> None:
+    from ai_agent.console import configure_utf8_output
+
+    configure_utf8_output()
     parser = argparse.ArgumentParser(description="Agent 评测集 — 自测模式")
     parser.add_argument("--list", action="store_true", help="列出所有评测用例，不执行")
     parser.add_argument("--tag", type=str, default=None, help="只运行指定 capability 标签的用例")
-    parser.add_argument("--name", type=str, default=None, help="只运行名称匹配的用例（支持逗号分隔多个子串，如 'chat_simple,calculator_security'）")
-    parser.add_argument("--no-rag", action="store_true", help="跳过 RAG 知识库构建（评测无需 RAG 时加快启动）")
-    parser.add_argument("--html-report", type=str, default=None,
-                        help="生成 HTML 评测报告到指定路径（如 eval_report.html）")
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="只运行名称匹配的用例（支持逗号分隔多个子串，如 'chat_simple,calculator_security'）",
+    )
+    parser.add_argument(
+        "--no-rag", action="store_true", help="跳过 RAG 知识库构建（评测无需 RAG 时加快启动）"
+    )
+    parser.add_argument(
+        "--html-report", type=str, default=None, help="生成 HTML 评测报告到指定路径（如 eval_report.html）"
+    )
+    parser.add_argument(
+        "--enable-dangerous-tools",
+        action="store_true",
+        help="允许评测运行终端/代码执行用例（仅在隔离的本机环境使用）",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -600,7 +630,7 @@ def main() -> None:
             if case.expected_tool:
                 expected += f" → {case.expected_tool}"
             if case.expected_contains:
-                expected += f"  包含: [{', '.join(case.expected_contains[:2])}{'...' if len(case.expected_contains)>2 else ''}]"
+                expected += f"  包含: [{', '.join(case.expected_contains[:2])}{'...' if len(case.expected_contains) > 2 else ''}]"
             print(f"  {i:2d}. {case.name:<32s}{tag_marker}{expected}")
         print(f"\n共 {len(EVAL_CASES)} 条用例，覆盖 {len(_CAPABILITY_TAGS)} 个能力维度")
         print(f"能力标签: {', '.join(_CAPABILITY_TAGS)}")
@@ -609,78 +639,135 @@ def main() -> None:
     # ---- 自包含初始化（不依赖 main.py，CLI 与 Web UI 共用同一套模块） ----
     try:
         from dotenv import load_dotenv
+
         load_dotenv()
     except ImportError:
         pass
 
+    from ai_agent.app_core import (
+        SYSTEM_PROMPT,
+        TOOL_SCHEMAS,
+        build_tool_executor,
+        build_tool_map,
+    )
     from ai_agent.client import LMStudioClient
-    from ai_agent.rag import RAGKnowledgeBase
     from ai_agent.config import Config
-    from ai_agent.app_core import SYSTEM_PROMPT, TOOL_SCHEMAS, build_tool_map
+    from ai_agent.rag import RAGKnowledgeBase
 
     cfg = Config.from_env()
-    client = LMStudioClient(cfg.base_url, cfg.api_key, cfg.model)
+    client = LMStudioClient(
+        cfg.base_url,
+        cfg.api_key,
+        cfg.model,
+        timeout=cfg.request_timeout,
+    )
 
     status = client.check_server_status()
     if not status["server_running"] or not status["model_loaded"]:
         print(f"❌ LM Studio 未就绪（服务={status['server_running']}, 模型={status['model_loaded']}）")
-        print(f"   请先启动 LM Studio 并加载模型后再运行评测。")
+        print("   请先启动 LM Studio 并加载模型后再运行评测。")
         sys.exit(1)
     print(f"✅ LM Studio 就绪，已加载模型: {status.get('model_name', 'unknown')}")
 
-    # RAG 延迟加载：评测用例不涉及 search_knowledge 可 --no-rag 跳过
-    rag: RAGKnowledgeBase | None = None
-    if not args.no_rag:
-        print("ℹ️ 构建 RAG 知识库（可 --no-rag 跳过）...")
-        try:
-            rag = RAGKnowledgeBase(
-                base_url=cfg.base_url, embed_model=cfg.embed_model,
-                chunk_size=cfg.chunk_size, chunk_overlap=cfg.chunk_overlap,
-                cache_file=cfg.rag_cache_file,
-            )
-            rag.build(["docs/通用Agent时代价值迁移.md"])
-            print("  RAG 就绪")
-        except Exception as e:
-            print(f"  RAG 初始化失败（{e}），评测将跳过 search_knowledge 能力")
-            rag = None
-    else:
-        print("ℹ️ 已跳过 RAG 知识库构建（--no-rag）")
+    project_root = os.path.abspath(cfg.project_root)
+    with tempfile.TemporaryDirectory(prefix="ai-agent-eval-") as workspace:
+        readme_src = os.path.join(project_root, "README.md")
+        if os.path.exists(readme_src):
+            shutil.copy2(readme_src, os.path.join(workspace, "README.md"))
 
-    # 确保测试图片存在（demo_vision 需要）
-    test_image = "_test_chart.png"
-    if not os.path.exists(test_image):
-        try:
-            from PIL import Image, ImageDraw
-            img = Image.new("RGB", (640, 400), "white")
-            draw = ImageDraw.Draw(img)
-            for i, (label, h) in enumerate([("AI Agent", 120), ("RAG", 200), ("Agentic", 160), ("Multi-Agent", 90)]):
-                x = 60 + i * 140
-                draw.rectangle([x, 400 - h, x + 120, 400], fill="steelblue")
-                draw.text((x + 20, 400 - h - 25), label, fill="black")
-            draw.text((20, 20), "2026 AI Field Attention Survey", fill="black")
-            img.save(test_image)
-            print(f"ℹ️ 已生成测试图片 {test_image}")
-        except Exception:
-            pass
+        # Seed SQL fixtures inside the temporary workspace.
+        from ai_agent.tools import sql_query
 
-    tool_map = build_tool_map(client, lambda: rag, test_image)
+        sql_query(
+            os.path.join(workspace, "demo.db"),
+            "SELECT COUNT(*) FROM users",
+            workspace_root=workspace,
+        )
 
-    evaluator = Evaluator(
-        client=client,
-        system_prompt=SYSTEM_PROMPT,
-        tools=TOOL_SCHEMAS,
-        tool_map=tool_map,
-        max_iterations=5,
-    )
-    results = evaluator.run(tag=args.tag, name_filter=args.name)
+        rag: RAGKnowledgeBase | None = None
+        if not args.no_rag:
+            print("ℹ️ 构建 RAG 知识库（可 --no-rag 跳过）...")
+            doc_src = os.path.join(project_root, "docs/通用Agent时代价值迁移.md")
+            doc_dst = os.path.join(workspace, "knowledge.md")
+            try:
+                shutil.copy2(doc_src, doc_dst)
+                rag = RAGKnowledgeBase(
+                    base_url=cfg.base_url,
+                    embed_model=cfg.embed_model,
+                    chunk_size=cfg.chunk_size,
+                    chunk_overlap=cfg.chunk_overlap,
+                    cache_file=os.path.join(workspace, "_rag_cache.json"),
+                    request_timeout=cfg.request_timeout,
+                )
+                rag.build([doc_dst])
+                print("  RAG 就绪")
+            except Exception as exc:
+                print(f"  RAG 初始化失败（{exc}），评测将跳过 search_knowledge 能力")
+                rag = None
+        else:
+            print("ℹ️ 已跳过 RAG 知识库构建（--no-rag）")
 
-    # HTML 报告
-    if args.html_report:
-        evaluator._generate_html_report(results, args.html_report)
+        test_image = os.path.join(workspace, "_test_chart.png")
+        if not os.path.exists(test_image):
+            try:
+                from PIL import Image, ImageDraw
 
-    # 返回码：有失败则非零
-    failed = sum(1 for r in results if not r.passed)
-    sys.exit(0 if failed == 0 else 1)
+                img = Image.new("RGB", (640, 400), "white")
+                draw = ImageDraw.Draw(img)
+                for i, (label, h) in enumerate(
+                    [
+                        ("AI Agent", 120),
+                        ("RAG", 200),
+                        ("Agentic", 160),
+                        ("Multi-Agent", 90),
+                    ]
+                ):
+                    x = 60 + i * 140
+                    draw.rectangle([x, 400 - h, x + 120, 400], fill="steelblue")
+                    draw.text((x + 20, 400 - h - 25), label, fill="black")
+                draw.text((20, 20), "2026 AI Field Attention Survey", fill="black")
+                img.save(test_image)
+            except Exception:
+                pass
+
+        tool_map = build_tool_map(
+            client,
+            lambda: rag,
+            test_image,
+            workspace_root=workspace,
+        )
+        tool_executor = build_tool_executor(
+            tool_map,
+            allow_write=True,
+            allow_execute=args.enable_dangerous_tools,
+            allow_mcp=False,
+            confirm_write=False,
+            confirm_execute=False,
+            confirm_mcp=False,
+        )
+
+        evaluator = Evaluator(
+            client=client,
+            system_prompt=SYSTEM_PROMPT,
+            tools=TOOL_SCHEMAS,
+            tool_map=tool_map,
+            max_iterations=5,
+            tool_executor=tool_executor,
+        )
+        cases = EVAL_CASES
+        if not args.enable_dangerous_tools:
+            cases = [case for case in cases if case.expected_tool not in {"run_terminal", "demo_code_run"}]
+        results = evaluator.run(
+            cases=cases,
+            tag=args.tag,
+            name_filter=args.name,
+        )
+
+        if args.html_report:
+            evaluator._generate_html_report(results, args.html_report)
+
+        failed = sum(1 for result in results if not result.passed)
+        sys.exit(0 if failed == 0 else 1)
 
 
 if __name__ == "__main__":

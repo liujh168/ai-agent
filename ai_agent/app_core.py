@@ -14,13 +14,20 @@ from __future__ import annotations
 
 import os
 
-from ai_agent.tools import (
-    run_code, get_weather, calculator, web_search,
-    file_read, file_write, sql_query, run_terminal, human_confirm,
-    FEW_SHOT_TEMPLATES,
-)
 from ai_agent.multi_agent import run_multi_agent
-
+from ai_agent.tooling import ToolExecutor, ToolPolicy
+from ai_agent.tools import (
+    FEW_SHOT_TEMPLATES,
+    calculator,
+    file_read,
+    file_write,
+    get_weather,
+    human_confirm,
+    run_code,
+    run_terminal,
+    sql_query,
+    web_search,
+)
 
 # ============================================================
 # 系统提示词（自然语言 → 工具路由的"真相源"）
@@ -175,7 +182,10 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "db_path": {"type": "string", "description": "SQLite 数据库文件路径，如 demo.db"},
-                    "sql": {"type": "string", "description": "SQL 语句，如 SELECT * FROM users WHERE city='北京'"},
+                    "sql": {
+                        "type": "string",
+                        "description": "SQL 语句，如 SELECT * FROM users WHERE city='北京'",
+                    },
                     "demo_seed": {
                         "type": "boolean",
                         "description": "是否首次自动建表+示例数据，默认 True（仅新库生效）",
@@ -193,7 +203,10 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "要执行的命令，如 Get-Date、dir、python --version"},
+                    "command": {
+                        "type": "string",
+                        "description": "要执行的命令，如 Get-Date、dir、python --version",
+                    },
                     "timeout": {"type": "integer", "description": "超时秒数，默认 15"},
                 },
                 "required": ["command"],
@@ -222,7 +235,10 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string", "description": "需要用 few-shot 方式回答的问题，如做情感分类、翻译、信息抽取等"},
+                    "question": {
+                        "type": "string",
+                        "description": "需要用 few-shot 方式回答的问题，如做情感分类、翻译、信息抽取等",
+                    },
                     "task_type": {
                         "type": "string",
                         "description": "任务类型：sentiment 情感分类（默认）/ polish 文本润色",
@@ -249,7 +265,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "demo_stream_chat",
             "description": "以流式方式演示对话（逐 token 边生成边输出）",
-            "parameters": {"type": "object", "properties": {"topic": {"type": "string", "description": "流式演示的话题"}}, "required": ["topic"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"topic": {"type": "string", "description": "流式演示的话题"}},
+                "required": ["topic"],
+            },
         },
     },
     {
@@ -257,7 +277,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "demo_reasoning",
             "description": "演示思维链推理（提示词引导，逐步展示推理过程），适合逻辑题、数学题",
-            "parameters": {"type": "object", "properties": {"question": {"type": "string", "description": "需要推理的问题"}}, "required": ["question"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string", "description": "需要推理的问题"}},
+                "required": ["question"],
+            },
         },
     },
     {
@@ -265,7 +289,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "demo_native_reasoning",
             "description": "演示原生推理模式（通过 reasoning_effort 参数触发模型内置思考，qwen3 等模型支持）",
-            "parameters": {"type": "object", "properties": {"question": {"type": "string", "description": "需要推理的问题"}}, "required": ["question"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string", "description": "需要推理的问题"}},
+                "required": ["question"],
+            },
         },
     },
     {
@@ -273,7 +301,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "demo_react",
             "description": "演示 ReAct（Reasoning + Acting）模式：让模型边想边做，交替输出 Thought→Action→Action Input，执行后把 Observation 喂回，直到 Final Answer。教学用途：展示 Agent 的思考轨迹和工具选择过程，与 Function Calling 黑盒模式形成对比",
-            "parameters": {"type": "object", "properties": {"question": {"type": "string", "description": "需要 ReAct 方式回答的问题"}}, "required": ["question"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string", "description": "需要 ReAct 方式回答的问题"}},
+                "required": ["question"],
+            },
         },
     },
     {
@@ -281,7 +313,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "demo_code_run",
             "description": "代码执行 Agent：执行 Python 代码并返回输出/错误。当用户要求写代码运行、编程计算题、或想验证代码时调用。返回错误时可修正后再次调用",
-            "parameters": {"type": "object", "properties": {"code": {"type": "string", "description": "要执行的 Python 代码"}}, "required": ["code"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string", "description": "要执行的 Python 代码"}},
+                "required": ["code"],
+            },
         },
     },
     {
@@ -289,7 +325,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_knowledge",
             "description": "RAG 知识库问答：基于项目内 PDF/MD/TXT 资料检索并回答。当用户询问 AI Agent 概念、原理、资料内容时调用",
-            "parameters": {"type": "object", "properties": {"question": {"type": "string", "description": "需要查询的问题"}}, "required": ["question"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string", "description": "需要查询的问题"}},
+                "required": ["question"],
+            },
         },
     },
     {
@@ -297,7 +337,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "reflexion_answer",
             "description": "反思与自我修正：先作答→自我批评→修正，多轮迭代提升答案质量。适合需要高准确率的复杂问题",
-            "parameters": {"type": "object", "properties": {"question": {"type": "string", "description": "需要严谨回答的问题"}}, "required": ["question"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string", "description": "需要严谨回答的问题"}},
+                "required": ["question"],
+            },
         },
     },
     {
@@ -305,7 +349,13 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "demo_vision",
             "description": "图像识别：分析本地图片（描述内容/OCR/理解图表）。不填 image_path 时使用自动生成的测试图表",
-            "parameters": {"type": "object", "properties": {"image_path": {"type": "string", "description": "图片路径（可选，默认测试图）"}, "question": {"type": "string", "description": "针对图片的问题"}}},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "图片路径（可选，默认测试图）"},
+                    "question": {"type": "string", "description": "针对图片的问题"},
+                },
+            },
         },
     },
     {
@@ -313,7 +363,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "plan_task",
             "description": "任务规划分解（Planner-Executor）：把复杂任务拆解为有序子任务并逐个执行完成。当用户要求规划任务、拆解任务、分步骤完成复杂任务、写文章大纲并展开时调用",
-            "parameters": {"type": "object", "properties": {"task": {"type": "string", "description": "需要规划并执行的任务"}}, "required": ["task"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"task": {"type": "string", "description": "需要规划并执行的任务"}},
+                "required": ["task"],
+            },
         },
     },
     {
@@ -321,7 +375,14 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "extract_structured",
             "description": "结构化输出：从文本中按指定字段提取数据，输出格式化 JSON。当用户要求提取结构化信息、抽取字段、生成 JSON 数据时调用",
-            "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "要提取信息的源文本"}, "fields": {"type": "string", "description": "逗号分隔的字段名，如：姓名,年龄,城市"}}, "required": ["text", "fields"]},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "要提取信息的源文本"},
+                    "fields": {"type": "string", "description": "逗号分隔的字段名，如：姓名,年龄,城市"},
+                },
+                "required": ["text", "fields"],
+            },
         },
     },
     {
@@ -329,7 +390,11 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "run_multi_agent",
             "description": "多 Agent 协作演示：Planner（规划）→ Executor（执行）→ Critic（评审）三角色分工协作。当用户提到多 Agent、多智能体、Planner-Executor-Critic、角色协作、分工协作时调用。适合复杂任务分解、多步骤产出、需要质量把关的场景",
-            "parameters": {"type": "object", "properties": {"task": {"type": "string", "description": "需要多 Agent 协作完成的复杂任务"}}, "required": ["task"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"task": {"type": "string", "description": "需要多 Agent 协作完成的复杂任务"}},
+                "required": ["task"],
+            },
         },
     },
 ]
@@ -354,10 +419,17 @@ def get_tool_schemas(mcp_manager=None) -> list[dict]:
 
 # ReAct 演示时用不到、且会形成递归的内部演示工具
 _REACT_EXCLUDE = {
-    "demo_stream_chat", "demo_reasoning", "demo_native_reasoning",
-    "demo_react", "demo_code_run", "reflexion_answer",
-    "demo_vision", "plan_task", "summarize_history",
-    "demo_few_shot", "extract_structured",
+    "demo_stream_chat",
+    "demo_reasoning",
+    "demo_native_reasoning",
+    "demo_react",
+    "demo_code_run",
+    "reflexion_answer",
+    "demo_vision",
+    "plan_task",
+    "summarize_history",
+    "demo_few_shot",
+    "extract_structured",
 }
 
 
@@ -369,9 +441,15 @@ def clean_react_tool_map(tool_map: dict) -> dict:
     return cleaned
 
 
-def build_tool_map(client, get_rag, test_image: str = "_test_chart.png",
-                  get_history=None, set_history=None,
-                  mcp_manager=None) -> dict:
+def build_tool_map(
+    client,
+    get_rag,
+    test_image: str = "_test_chart.png",
+    get_history=None,
+    set_history=None,
+    mcp_manager=None,
+    workspace_root: str | None = None,
+) -> dict:
     """
     构建完整的工具映射（函数名 → 可调用对象）。
     get_rag: 无参可调用，返回 RAGKnowledgeBase 实例或 None（支持 Web 端延迟加载）。
@@ -380,14 +458,32 @@ def build_tool_map(client, get_rag, test_image: str = "_test_chart.png",
     mcp_manager: 可选 MCPManager，传入后自动追加远端 MCP 工具。
     """
     tool_map: dict = {}
+    workspace_root = workspace_root or os.getcwd()
 
     # ---------- 1. 模块级纯工具（tools.py）直接引用 ----------
     tool_map["get_weather"] = get_weather
     tool_map["calculator"] = calculator
     tool_map["web_search"] = web_search
-    tool_map["file_read"] = file_read
-    tool_map["file_write"] = file_write
-    tool_map["sql_query"] = sql_query
+
+    def workspace_file_read(path: str, max_chars: int = 3000) -> str:
+        return file_read(path, max_chars=max_chars, workspace_root=workspace_root)
+
+    def workspace_file_write(path: str, content: str, mode: str = "write") -> str:
+        return file_write(path, content, mode=mode, workspace_root=workspace_root)
+
+    workspace_file_read.__name__ = "file_read"
+    workspace_file_write.__name__ = "file_write"
+    workspace_file_read.__doc__ = file_read.__doc__
+    workspace_file_write.__doc__ = file_write.__doc__
+    tool_map["file_read"] = workspace_file_read
+    tool_map["file_write"] = workspace_file_write
+
+    def workspace_sql_query(db_path: str, sql: str, demo_seed: bool = True) -> str:
+        return sql_query(db_path, sql, demo_seed=demo_seed, workspace_root=workspace_root)
+
+    workspace_sql_query.__name__ = "sql_query"
+    workspace_sql_query.__doc__ = sql_query.__doc__
+    tool_map["sql_query"] = workspace_sql_query
     tool_map["run_terminal"] = run_terminal
     tool_map["human_confirm"] = human_confirm
     tool_map["demo_code_run"] = run_code
@@ -443,10 +539,10 @@ def build_tool_map(client, get_rag, test_image: str = "_test_chart.png",
         for i, (inp, out) in enumerate(template["examples"], 1):
             example_blocks.append(f"[示例 {i}]\n输入：{inp}\n输出：{out}")
         few_shot_prompt = (
-            f"你是一个擅长 Prompt Engineering 的助手。\n"
-            f"通过以下示例，你需要理解任务模式，然后对新问题给出答案。\n\n"
+            "你是一个擅长 Prompt Engineering 的助手。\n"
+            "通过以下示例，你需要理解任务模式，然后对新问题给出答案。\n\n"
             + "\n\n".join(example_blocks)
-            + f"\n\n--- 请理解上述模式，然后回答新问题 ---\n\n"
+            + "\n\n--- 请理解上述模式，然后回答新问题 ---\n\n"
             + f"输入：{question}\n输出："
         )
         response = client.chat([{"role": "user", "content": few_shot_prompt}], temperature=0.1)
@@ -474,9 +570,7 @@ def build_tool_map(client, get_rag, test_image: str = "_test_chart.png",
 
     # summarize_history 需要读写 App 自身的 history，仅在提供访问器时注册
     if get_history is not None:
-        tool_map["summarize_history"] = make_summarize_history(
-            client, get_history, set_history
-        )
+        tool_map["summarize_history"] = make_summarize_history(client, get_history, set_history)
 
     # ---------- 3. MCP 远端工具（可选，追加在本地工具之后）----------
     if mcp_manager is not None:
@@ -486,19 +580,65 @@ def build_tool_map(client, get_rag, test_image: str = "_test_chart.png",
     return tool_map
 
 
+def build_tool_executor(
+    tool_map: dict,
+    *,
+    allow_write: bool = True,
+    allow_execute: bool = False,
+    allow_mcp: bool = True,
+    confirm_write: bool = False,
+    confirm_execute: bool = True,
+    confirm_mcp: bool = True,
+    mcp_allowlist: tuple[str, ...] = (),
+    confirm=None,
+) -> ToolExecutor:
+    """Build the policy-enforcing executor used by CLI and Web."""
+    requested_mcp = frozenset(item for item in mcp_allowlist if item)
+    policy = ToolPolicy(
+        allow_write=allow_write,
+        allow_execute=allow_execute,
+        allow_mcp=allow_mcp,
+        confirm_write=confirm_write,
+        confirm_execute=confirm_execute,
+        confirm_mcp=confirm_mcp,
+        mcp_allowlist=requested_mcp or None,
+    )
+    return ToolExecutor(tool_map, policy=policy, confirm=confirm)
+
+
+def filter_tool_schemas(tool_schemas: list[dict], policy: ToolPolicy) -> list[dict]:
+    """Hide schemas that the executor would categorically deny."""
+    filtered = []
+    for schema in tool_schemas:
+        name = schema.get("function", {}).get("name", "")
+        risk = policy.classify(name)
+        if risk == "write" and not policy.allow_write:
+            continue
+        if risk == "execute" and not policy.allow_execute:
+            continue
+        if risk == "mcp":
+            if not policy.allow_mcp:
+                continue
+            if policy.mcp_allowlist is not None and name not in policy.mcp_allowlist:
+                continue
+        filtered.append(schema)
+    return filtered
+
+
 def make_summarize_history(client, get_history, set_history) -> callable:
     """
     生成一个 summarize_history 工具闭包。
     get_history / set_history 用于在 App 状态上读写 history（CLI / Web 各自的存储不同）。
     """
+
     def summarize_history() -> str:
         old = get_history()
         old_len = len(old)
-        old_chars = sum(len(m["content"]) for m in old)
+        old_chars = sum(len(m.get("content") or "") for m in old)
         new = client.summarize_messages(old, keep_recent=4)
         set_history(new)
         new_len = len(new)
-        new_chars = sum(len(m["content"]) for m in new)
+        new_chars = sum(len(m.get("content") or "") for m in new)
         return (
             f"✅ 对话历史摘要压缩完成！\n"
             f"  消息条数: {old_len} → {new_len}\n"

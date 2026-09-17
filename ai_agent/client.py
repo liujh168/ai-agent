@@ -12,8 +12,8 @@ import os
 import re
 import time
 
-from openai import OpenAI
 import requests
+from openai import OpenAI
 
 log = logging.getLogger("Agent")
 
@@ -22,16 +22,29 @@ log = logging.getLogger("Agent")
 # LM Studio 客户端
 # ============================================================
 
+
 class LMStudioClient:
     """LM Studio API 客户端，自动检测模型是否已加载"""
 
-    def __init__(self, base_url: str = "http://localhost:1234/v1", api_key: str = "lm-studio", model: str = "auto"):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:1234/v1",
+        api_key: str = "lm-studio",
+        model: str = "auto",
+        timeout: float = 120.0,
+        client=None,
+    ):
         self.base_url = os.environ.get("LM_STUDIO_BASE_URL", base_url)
         self.api_key = api_key
         self.model = os.environ.get("LM_STUDIO_MODEL", model)
-        self.client = OpenAI(base_url=self.base_url, api_key=api_key)
-        self._model_checked = False      # 只在首次调用时打印状态
-        self._model_cached_name = None   # 首次 ensure_model_loaded 成功后缓存，跳过后续 HTTP 检查
+        self.timeout = timeout
+        self.client = client or OpenAI(
+            base_url=self.base_url,
+            api_key=api_key,
+            timeout=timeout,
+        )
+        self._model_checked = False  # 只在首次调用时打印状态
+        self._model_cached_name = None  # 首次 ensure_model_loaded 成功后缓存，跳过后续 HTTP 检查
 
     def check_server_status(self) -> dict:
         """检测 LM Studio 服务是否运行，以及模型是否已加载"""
@@ -40,6 +53,7 @@ class LMStudioClient:
             "model_loaded": False,
             "model_name": None,
             "error": None,
+            "models": [],
         }
         try:
             resp = requests.get(f"{self.base_url}/models", timeout=5)
@@ -47,9 +61,29 @@ class LMStudioClient:
                 result["server_running"] = True
                 data = resp.json()
                 models = data.get("data", [])
-                if models:
+                model_ids = [
+                    str(item.get("id")) for item in models if isinstance(item, dict) and item.get("id")
+                ]
+                result["models"] = model_ids
+
+                chat_models = [
+                    model_id for model_id in model_ids if not self._looks_like_embedding_model(model_id)
+                ]
+                if self.model != "auto":
+                    if self.model in model_ids:
+                        result["model_loaded"] = True
+                        result["model_name"] = self.model
+                    elif chat_models:
+                        result["error"] = (
+                            f"已配置模型 {self.model!r} 未加载；当前聊天模型: {', '.join(chat_models)}"
+                        )
+                    else:
+                        result["error"] = "未发现可用的聊天模型（只发现了 embedding 模型）"
+                elif chat_models:
                     result["model_loaded"] = True
-                    result["model_name"] = models[0].get("id", "unknown")
+                    result["model_name"] = chat_models[0]
+                elif model_ids:
+                    result["error"] = "未发现可用的聊天模型（只发现了 embedding 模型）"
             else:
                 result["error"] = f"服务器返回状态码 {resp.status_code}"
         except requests.ConnectionError:
@@ -60,6 +94,11 @@ class LMStudioClient:
             result["error"] = str(e)
         return result
 
+    @staticmethod
+    def _looks_like_embedding_model(model_name: str) -> bool:
+        lowered = model_name.lower()
+        return "embed" in lowered or "embedding" in lowered
+
     def ensure_model_loaded(self) -> str:
         """确保模型已加载，未加载则抛出异常。成功后缓存结果，后续调用直接返回省掉 HTTP 健康检查。"""
         if self._model_cached_name is not None:
@@ -68,9 +107,9 @@ class LMStudioClient:
         if not status["server_running"]:
             raise RuntimeError(status["error"])
         if not status["model_loaded"]:
-            raise RuntimeError(
-                "LM Studio 服务已运行，但未加载模型。请在 LM Studio 中加载一个模型后重试。"
-            )
+            raise RuntimeError(status["error"] or "LM Studio 服务已运行，但未加载可用的聊天模型。")
+        if self.model == "auto":
+            self.model = status["model_name"]
         if not self._model_checked:
             target = f" → {self.model}" if self.model != "auto" else " (auto)"
             log.info("服务运行中，已加载模型: %s%s", status["model_name"], target)
@@ -84,22 +123,29 @@ class LMStudioClient:
             return messages
 
         system_msg = messages[0] if messages and messages[0]["role"] == "system" else None
-        recent = messages[-keep_recent:]
-        to_summarize = messages[1:-keep_recent] if system_msg else messages[:-keep_recent]
+        boundary = max(1 if system_msg else 0, len(messages) - keep_recent)
+        while boundary > (1 if system_msg else 0) and messages[boundary].get("role") != "user":
+            boundary -= 1
+        recent = messages[boundary:]
+        to_summarize = messages[1:boundary] if system_msg else messages[:boundary]
 
         # 清洗掉 tool_calls / tool 类型的噪声消息（纯对话摘要）
-        clean = [m for m in to_summarize if m["role"] in ("user", "assistant")]
-        history_text = "\n".join(
-            f"[{m['role'].upper()}]: {m['content']}" for m in clean
-        )
+        clean = [m for m in to_summarize if m.get("role") in ("user", "assistant") and m.get("content")]
+        history_text = "\n".join(f"[{m['role'].upper()}]: {m['content']}" for m in clean)
 
         summary = self.chat(
-            [{"role": "user", "content": (
-                "请对以下对话历史做简洁摘要（200-300 字），保留关键事实、决定、已完成任务和"
-                "待续事项，用第三人称叙述，不要省略时间、数字、名字等硬信息。\n\n"
-                f"=== 对话历史 ===\n{history_text}\n\n=== 摘要 ==="
-            )}],
-            temperature=0.1, max_tokens=512,
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        "请对以下对话历史做简洁摘要（200-300 字），保留关键事实、决定、已完成任务和"
+                        "待续事项，用第三人称叙述，不要省略时间、数字、名字等硬信息。\n\n"
+                        f"=== 对话历史 ===\n{history_text}\n\n=== 摘要 ==="
+                    ),
+                }
+            ],
+            temperature=0.1,
+            max_tokens=512,
         )
 
         new_history = []
@@ -109,12 +155,17 @@ class LMStudioClient:
         new_history.extend(recent)
         return new_history
 
-    def chat(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2048, stream: bool = False):
+    def chat(
+        self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2048, stream: bool = False
+    ):
         """发送聊天请求，自动检测模型加载状态"""
         self.ensure_model_loaded()
         response = self.client.chat.completions.create(
-            model=self.model, messages=messages,
-            temperature=temperature, max_tokens=max_tokens, stream=stream,
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=stream,
         )
         if stream:
             return response
@@ -124,14 +175,19 @@ class LMStudioClient:
         """流式聊天，逐 token 输出"""
         self.ensure_model_loaded()
         stream = self.client.chat.completions.create(
-            model=self.model, messages=messages,
-            temperature=temperature, max_tokens=max_tokens, stream=True,
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
         )
+
         def _generator():
             for chunk in stream:
                 delta = chunk.choices[0].delta
                 if delta.content:
                     yield delta.content
+
         return _generator()
 
     def chat_with_tools(
@@ -144,64 +200,31 @@ class LMStudioClient:
         max_iterations: int = 5,
         skill_registry=None,
         mcp_manager=None,
+        tool_executor=None,
+        on_event=None,
+        session_id: str | None = None,
     ):
-        """Tool Calling 循环：自主选择工具 → 执行 → 把结果喂回模型，直到模型返回最终文本"""
-        self.ensure_model_loaded()
+        """Delegate the tool loop to :class:`AgentRuntime` and return final text."""
+        from ai_agent.runtime import AgentRuntime
 
-        # ---------- Skill 路由：关键词匹配命中 Skill → 跳到 Skill 执行 ----------
-        if skill_registry is not None:
-            last_user = next(
-                (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
-            )
-            if last_user:
-                matched = skill_registry.match(last_user)
-                if matched is not None:
-                    log.info("[Skill 激活] %s（来自 chat_with_tools 路由）", matched.name)
-                    return self.chat_with_skill(
-                        messages, matched, tool_map,
-                        temperature=temperature, max_tokens=max_tokens,
-                        mcp_manager=mcp_manager,
-                    )
-        # ---------- 下面是原有逻辑，一行都不用改 ----------
-        history = list(messages)
-
-        for _ in range(max_iterations):
-            response = self.client.chat.completions.create(
-                model=self.model, messages=history, tools=tools,
-                temperature=temperature, max_tokens=max_tokens,
-            )
-            choice = response.choices[0]
-
-            if choice.finish_reason == "stop":
-                return choice.message.content
-
-            if choice.finish_reason == "tool_calls":
-                tool_calls = choice.message.tool_calls
-                history.append(choice.message.model_dump())
-
-                for tool_call in tool_calls:
-                    func_name = tool_call.function.name
-                    func_args = tool_call.function.arguments
-                    print(f"[Tool Call] 调用工具: {func_name}({func_args})")
-                    t0 = time.time()
-
-                    if func_name in tool_map:
-                        try:
-                            args = json.loads(func_args)
-                        except json.JSONDecodeError:
-                            result = f"错误：无法解析参数 JSON，工具 '{func_name}' 需要的参数被模型输出异常。请列出需要的正确参数格式。"
-                            history.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
-                            continue
-                        result = str(tool_map[func_name](**args))
-                    else:
-                        result = f"错误: 未知工具 {func_name}"
-
-                    dt = time.time() - t0
-                    print(f"[Tool Result] {result[:200]}... ({dt*1000:.0f}ms)")
-                    log.info("tool %s completed in %.0fms", func_name, dt * 1000)
-                    history.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
-
-        return "已达到最大工具调用迭代次数。"
+        final = None
+        runtime = AgentRuntime(self, tool_executor=tool_executor)
+        for event in runtime.run(
+            messages,
+            tools,
+            tool_map,
+            session_id=session_id,
+            max_iterations=max_iterations,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            skill_registry=skill_registry,
+            mcp_manager=mcp_manager,
+        ):
+            if on_event is not None:
+                on_event(event)
+            if event.kind == "final":
+                final = event.payload.get("content", "")
+        return final or "未获得模型输出。"
 
     # ============================================================
     # Skill 执行 — 场景化 System Prompt + 工具子集过滤 + 多轮循环
@@ -210,7 +233,7 @@ class LMStudioClient:
     def chat_with_skill(
         self,
         messages: list[dict],
-        skill,           # SkillDef 实例（避免循环导入，不传具体类型）
+        skill,  # SkillDef 实例（避免循环导入，不传具体类型）
         tool_map: dict,
         temperature: float = 0.7,
         max_tokens: int = 2048,
@@ -249,19 +272,24 @@ class LMStudioClient:
 
         # 生成过滤后的 tool schemas（包含 MCP 远端工具如果有 mcp_manager）
         all_schemas = get_tool_schemas(mcp_manager)
-        filtered_schemas = [
-            s for s in all_schemas
-            if s["function"]["name"] in filtered_map
-        ]
+        filtered_schemas = [s for s in all_schemas if s["function"]["name"] in filtered_map]
 
-        log.info("chat_with_skill: %s, 可用工具=%d/%d, max_rounds=%d",
-                 skill.name, len(filtered_map), len(tool_map), skill.max_rounds)
+        log.info(
+            "chat_with_skill: %s, 可用工具=%d/%d, max_rounds=%d",
+            skill.name,
+            len(filtered_map),
+            len(tool_map),
+            skill.max_rounds,
+        )
 
         # ---------- 3. 多轮 Function Calling 循环（复用 chat_with_tools 的逻辑） ----------
         for _ in range(skill.max_rounds):
             response = self.client.chat.completions.create(
-                model=self.model, messages=history, tools=filtered_schemas,
-                temperature=temperature, max_tokens=max_tokens,
+                model=self.model,
+                messages=history,
+                tools=filtered_schemas,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
             choice = response.choices[0]
 
@@ -294,7 +322,7 @@ class LMStudioClient:
 
                     dt = time.time() - t0
                     preview = result[:200] + ("..." if len(result) > 200 else "")
-                    print(f"[Skill:{skill.name}] 结果 ({dt*1000:.0f}ms): {preview}")
+                    print(f"[Skill:{skill.name}] 结果 ({dt * 1000:.0f}ms): {preview}")
                     log.info("skill %s tool %s completed in %.0fms", skill.name, func_name, dt * 1000)
                     history.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
 
@@ -309,7 +337,9 @@ class LMStudioClient:
     # ============================================================
 
     # ReAct 输出解析正则
-    _REACT_THOUGHT_RE = re.compile(r"Thought\s*[:：]\s*(.+?)(?=\n\s*(?:Action|Final)\s*[:：]|$)", re.DOTALL | re.IGNORECASE)
+    _REACT_THOUGHT_RE = re.compile(
+        r"Thought\s*[:：]\s*(.+?)(?=\n\s*(?:Action|Final)\s*[:：]|$)", re.DOTALL | re.IGNORECASE
+    )
     _REACT_ACTION_RE = re.compile(r"Action\s*[:：]\s*(\w+)", re.IGNORECASE)
     _REACT_ACTION_INPUT_RE = re.compile(
         r"Action\s*Input\s*[:：]\s*(.+?)(?=\n\s*(?:Observation|Final|Thought|Action)\s*[:：]|$)",
@@ -324,6 +354,7 @@ class LMStudioClient:
         max_iterations: int = 6,
         temperature: float = 0.5,
         max_tokens: int = 2048,
+        on_event=None,
     ) -> str:
         """
         ReAct（Reasoning + Acting）模式：
@@ -336,6 +367,12 @@ class LMStudioClient:
         让学习者看清 Agent 是"边想边做"还是"先想好再做"。
         """
         self.ensure_model_loaded()
+
+        def emit(line: str, kind: str = "info") -> None:
+            if on_event is not None:
+                on_event(line, kind)
+            else:
+                print(line)
 
         # 构造工具描述文本（ReAct 用自然语言告诉模型有哪些工具）
         tool_descriptions = ""
@@ -353,7 +390,7 @@ class LMStudioClient:
             "严格按以下格式输出（每次只输出一个完整 Thought + Action + Action Input，或一个 Final Answer）：\n"
             "  Thought: 你的思考\n"
             "  Action: 工具名\n"
-            "  Action Input: {\"key\": \"value\"}\n"
+            '  Action Input: {"key": "value"}\n'
             "  ... （我们会返回 Observation）\n"
             "  ... （继续循环）\n"
             "  Final Answer: 完整回答用户的问题\n\n"
@@ -362,12 +399,14 @@ class LMStudioClient:
 
         history = [{"role": "system", "content": react_system}] + list(messages)
 
-        print("\n╭──────── ReAct 推理轨迹 ────────")
+        emit("\n╭──────── ReAct 推理轨迹 ────────", "divider")
         for iteration in range(1, max_iterations + 1):
-            print(f"│\n│  🔄 第 {iteration} 轮")
+            emit(f"│\n│  🔄 第 {iteration} 轮")
             response = self.client.chat.completions.create(
-                model=self.model, messages=history,
-                temperature=temperature, max_tokens=max_tokens,
+                model=self.model,
+                messages=history,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
             raw = response.choices[0].message.content or ""
             history.append({"role": "assistant", "content": raw})
@@ -376,8 +415,8 @@ class LMStudioClient:
             m_final = self._REACT_FINAL_RE.search(raw)
             if m_final:
                 final = m_final.group(1).strip()
-                print(f"│  ✅ Final Answer: {final[:120]}{'…' if len(final) > 120 else ''}")
-                print(f"╰──────── 共 {iteration} 轮 ────────\n")
+                emit(f"│  ✅ Final Answer: {final[:120]}{'…' if len(final) > 120 else ''}", "final")
+                emit(f"╰──────── 共 {iteration} 轮 ────────\n", "divider")
                 return final
 
             # ---- 解析 Thought / Action / Action Input ----
@@ -387,7 +426,7 @@ class LMStudioClient:
 
             if thought_m:
                 thought = thought_m.group(1).strip()
-                print(f"│  💭 Thought: {thought}")
+                emit(f"│  💭 Thought: {thought}", "thought")
 
             if action_m:
                 action_name = action_m.group(1).strip()
@@ -401,36 +440,36 @@ class LMStudioClient:
                     except json.JSONDecodeError:
                         obs = f"❌ Action Input 不是合法 JSON，收到的内容：{args_str}"
                     else:
-                        print(f"│  🔧 Action: {action_name}")
-                        print(f"│  📥 Input:  {args_str}")
-                        t0 = time.time()
+                        emit(f"│  🔧 Action: {action_name}", "action")
+                        emit(f"│  📥 Input:  {args_str}", "action")
                         try:
                             tool_result = str(tool_map[action_name](**args))
                         except Exception as e:
                             tool_result = f"工具执行异常: {type(e).__name__}: {e}"
-                        dt = time.time() - t0
                         obs = tool_result
                         # 截断过长结果，避免上下文爆炸
                         if len(obs) > 800:
                             obs = obs[:800] + f"\n... [结果过长已截断，总长 {len(obs)} 字符]"
 
-                print(f"│  👁️ Observation: {obs[:200]}{'…' if len(obs) > 200 else ''}")
+                emit(f"│  👁️ Observation: {obs[:200]}{'…' if len(obs) > 200 else ''}", "observation")
                 history.append({"role": "user", "content": f"Observation: {obs}"})
                 continue
 
             # 如果既没 Final Answer 也没 Action，说明模型跑偏了
-            print(f"│  ⚠️ 模型未按 ReAct 格式输出，原始内容: {raw[:200]}...")
-            history.append({
-                "role": "user",
-                "content": (
-                    "上一次输出未识别到 Thought/Action/Action Input 或 Final Answer。"
-                    "请严格按格式重新输出，先写 Thought，再写 Action 和 Action Input，"
-                    "或者如果已能回答则写 Final Answer。"
-                ),
-            })
+            emit(f"│  ⚠️ 模型未按 ReAct 格式输出，原始内容: {raw[:200]}...", "error")
+            history.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "上一次输出未识别到 Thought/Action/Action Input 或 Final Answer。"
+                        "请严格按格式重新输出，先写 Thought，再写 Action 和 Action Input，"
+                        "或者如果已能回答则写 Final Answer。"
+                    ),
+                }
+            )
             continue
 
-        print(f"╰──────── 已达最大迭代 {max_iterations} 轮 ────────\n")
+        emit(f"╰──────── 已达最大迭代 {max_iterations} 轮 ────────\n", "divider")
         # 返回最后一轮模型说的东西（即使不是 Final Answer）
         return history[-1]["content"] if history else "已达最大迭代次数"
 
@@ -446,17 +485,29 @@ class LMStudioClient:
         last = guided[-1]
         guided[-1] = {**last, "content": f"{last['content']}\n\n{chain_prompt}"}
         response = self.client.chat.completions.create(
-            model=self.model, messages=guided, temperature=temperature, max_tokens=max_tokens,
+            model=self.model,
+            messages=guided,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
         return response.choices[0].message.content
 
-    def chat_with_native_reasoning(self, messages: list[dict], reasoning_effort: str = "high", temperature: float = 0.7, max_tokens: int = 8192):
+    def chat_with_native_reasoning(
+        self,
+        messages: list[dict],
+        reasoning_effort: str = "high",
+        temperature: float = 0.7,
+        max_tokens: int = 8192,
+    ):
         """原生 reasoning_effort 模式（qwen3 等推理模型）"""
         self.ensure_model_loaded()
         try:
             response = self.client.chat.completions.create(
-                model=self.model, messages=messages,
-                temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort,
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
             )
         except Exception as e:
             raise RuntimeError(
@@ -469,33 +520,51 @@ class LMStudioClient:
             return f"[模型内部推理]\n{reasoning}\n\n[最终回答]\n{message.content}"
         return message.content
 
-    def chat_with_reflexion(self, messages: list[dict], rounds: int = 3, temperature: float = 0.7, max_tokens: int = 2048):
+    def chat_with_reflexion(
+        self, messages: list[dict], rounds: int = 3, temperature: float = 0.7, max_tokens: int = 2048
+    ):
         """反思与自我修正：迭代多轮 作答 → 自我批评 → 修正"""
         self.ensure_model_loaded()
         history = [{"role": "system", "content": "你是一个严谨、追求答案正确的助手。"}] + list(messages)
 
         def _ask() -> str:
-            return self.client.chat.completions.create(
-                model=self.model, messages=history,
-                temperature=temperature, max_tokens=max_tokens,
-            ).choices[0].message.content
+            return (
+                self.client.chat.completions.create(
+                    model=self.model,
+                    messages=history,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                .choices[0]
+                .message.content
+            )
 
         draft = _ask()
         print(f"\n[反思·第1轮 初稿] {draft}")
 
         for i in range(1, rounds):
             history.append({"role": "assistant", "content": draft})
-            history.append({"role": "user", "content": (
-                f"请以严格批评者的身份审查上面第 {i} 轮的回答，"
-                "列出其中的错误、漏洞、缺失或可改进之处。不要重写答案，只输出批评意见。"
-            )})
+            history.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"请以严格批评者的身份审查上面第 {i} 轮的回答，"
+                        "列出其中的错误、漏洞、缺失或可改进之处。不要重写答案，只输出批评意见。"
+                    ),
+                }
+            )
             critique = _ask()
             print(f"\n[反思·第{i + 1}轮 批评] {critique}")
             history.append({"role": "assistant", "content": critique})
-            history.append({"role": "user", "content": (
-                "请结合上面的批评意见重新认真作答最初的问题，输出修正后的答案。"
-                + ("这是最后一轮修正，请给出最终完整答案。" if i == rounds - 1 else "")
-            )})
+            history.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "请结合上面的批评意见重新认真作答最初的问题，输出修正后的答案。"
+                        + ("这是最后一轮修正，请给出最终完整答案。" if i == rounds - 1 else "")
+                    ),
+                }
+            )
             draft = _ask()
             print(f"\n[反思·第{i + 1}轮 修正] {draft}")
         return draft
@@ -503,7 +572,13 @@ class LMStudioClient:
     def analyze_image(self, image_path: str, question: str = "请描述这张图片的内容", max_tokens: int = 1024):
         """图像识别：本地图片 base64 传给多模态模型"""
         self.ensure_model_loaded()
-        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+        mime_map = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }
         ext = image_path.lower()
         ext = next((k for k in mime_map if ext.endswith(k)), ".png")
         mime = mime_map[ext]
@@ -511,15 +586,22 @@ class LMStudioClient:
             b64 = base64.b64encode(f.read()).decode()
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": question},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-            ]}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": question},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                    ],
+                }
+            ],
             max_tokens=max_tokens,
         )
         return response.choices[0].message.content
 
-    def plan_and_execute(self, task: str, max_subtasks: int = 3, temperature: float = 0.7, max_tokens: int = 2048) -> str:
+    def plan_and_execute(
+        self, task: str, max_subtasks: int = 3, temperature: float = 0.7, max_tokens: int = 2048
+    ) -> str:
         """任务规划分解（Planner-Executor）：先规划后执行，逐个子任务完成"""
         self.ensure_model_loaded()
         plan_prompt = (
@@ -527,12 +609,20 @@ class LMStudioClient:
             "每行一个，格式为「1. 子任务描述」。只输出子任务清单，不要其他内容。\n\n"
             f"任务：{task}"
         )
-        plan_text = self.client.chat.completions.create(
-            model=self.model, messages=[{"role": "user", "content": plan_prompt}],
-            temperature=temperature, max_tokens=max_tokens,
-        ).choices[0].message.content
+        plan_text = (
+            self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": plan_prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            .choices[0]
+            .message.content
+        )
 
-        subtasks = [m.group(1).strip() for m in re.finditer(r"^\s*\d+[.、)]\s*(.+)$", plan_text or "", re.MULTILINE)]
+        subtasks = [
+            m.group(1).strip() for m in re.finditer(r"^\s*\d+[.、)]\s*(.+)$", plan_text or "", re.MULTILINE)
+        ]
         if not subtasks:
             subtasks = [task]
         subtasks = subtasks[:max_subtasks]
@@ -552,10 +642,16 @@ class LMStudioClient:
                 f"已完成部分：\n{prev}\n\n"
                 "请完成这个子任务，输出可以直接合并到最终成果的内容，不要复述整体任务。"
             )
-            result = self.client.chat.completions.create(
-                model=self.model, messages=[{"role": "user", "content": exec_prompt}],
-                temperature=temperature, max_tokens=max_tokens,
-            ).choices[0].message.content
+            result = (
+                self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": exec_prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                .choices[0]
+                .message.content
+            )
             print(f"\n[子任务 {i}/{len(subtasks)}] {st}")
             print(result)
             accumulated += f"\n{result}"
@@ -567,7 +663,9 @@ class LMStudioClient:
         )
         return f"已完成 {len(subtasks)} 个子任务（完整内容已在上方直接展示）。\n{summary}"
 
-    def structured_extract(self, text: str, fields: str, temperature: float = 0.0, max_tokens: int = 1024) -> str:
+    def structured_extract(
+        self, text: str, fields: str, temperature: float = 0.0, max_tokens: int = 1024
+    ) -> str:
         """结构化输出：按字段提取 JSON，带围栏清洗 + 失败重试（强化 prompt）"""
         self.ensure_model_loaded()
         prompt = (
@@ -577,11 +675,16 @@ class LMStudioClient:
         )
 
         def _generate(extra_hint: str = "") -> str:
-            return self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt + extra_hint}],
-                temperature=temperature, max_tokens=max_tokens,
-            ).choices[0].message.content
+            return (
+                self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt + extra_hint}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                .choices[0]
+                .message.content
+            )
 
         def _parse(content: str) -> dict:
             content = content.strip()
@@ -592,7 +695,9 @@ class LMStudioClient:
         try:
             data = _parse(raw)
         except json.JSONDecodeError:
-            raw = _generate("\n\n上一次输出不是合法 JSON，这次请**严格只输出** {\"字段1\": 值1, \"字段2\": 值2} 格式的 JSON。")
+            raw = _generate(
+                '\n\n上一次输出不是合法 JSON，这次请**严格只输出** {"字段1": 值1, "字段2": 值2} 格式的 JSON。'
+            )
             data = _parse(raw)
 
         return json.dumps(data, ensure_ascii=False, indent=2)
