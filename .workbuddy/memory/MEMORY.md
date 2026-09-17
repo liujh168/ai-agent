@@ -10,8 +10,8 @@
 - 测试：`ai_agent/tests/`（`test_core.py` 21 项含离线 RAG；`test_tools.py` 临时 SQLite 清理需重试绕开 Defender 锁）。
 
 ## 工程约定（务必遵守）
-- **仓库 HEAD 在 `master`**（不是 main），两分支并存。提交走 `scripts/git_commit.py --add <files> -m "..."`；该脚本已修复为 `update-ref HEAD`（跟随当前分支），不要用硬编码 main。
-- 该脚本用 Python 直写 git object 绕开 **Windows Defender 拦截 `git.exe` 写 `.git/objects`**；ref 写入仍用 git.exe（本机未被拦）。
+- **仓库 HEAD 在 `master`**（不是 main），两分支并存。提交直接用常规 `git commit`（本机 `git.exe` 写 `.git/objects` 正常，**无 Defender 拦截**）。
+- 原 `scripts/git_commit.py`（Python 直写对象绕 Defender 的脚本）**已于 2026-09-17 删除**——经实测 `git hash-object -w` / `git commit-tree` / `git commit` 均正常工作，该脚本基于「Defender 拦截 git.exe」的错误前提，已无必要。
 - 测试运行环境：WorkBuddy managed python venv `C:/Users/xuan/.workbuddy/binaries/python/envs/default`（Python 3.13.x），pytest 已装。
 - **依赖安装坑**：`pyproject.toml` 声明 `requires-python = ">=3.10,<3.13"`，而本机 venv 是 3.13.x（范围外）。**不能**用 `pip install -r requirements.txt`（含 `-e .` 会被 requires-python 拒绝）。正确做法：`python -m pip install -r requirements.lock pytest ruff`；测试从项目根目录 `python -m pytest`（无 `ai_agent/tests/__init__.py`，靠 cwd 导入 `ai_agent`）。
 - 安全约束：`demo_code_run` / `run_terminal` 属危险工具，Web `--share` 模式须禁用；`system.py` 命令黑名单含动词+链式绕过检测。
