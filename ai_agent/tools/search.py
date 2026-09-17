@@ -19,9 +19,29 @@ def _format_results(items, max_results):
     return "\n".join(lines)
 
 
+def _duckduckgo_search(query: str, max_results: int) -> str:
+    """降级路径：使用 DuckDuckGo 搜索（无需 API key）。"""
+    try:
+        from ddgs import DDGS
+
+        results = DDGS().text(query, max_results=max_results)
+        if not results:
+            return "DuckDuckGo 返回空结果"
+        items = [
+            {"name": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")}
+            for r in results
+        ]
+        out = _format_results(items, max_results)
+        return out + "\n\n（提示：已降级 DuckDuckGo 搜索，配置 BOCHA_API_KEY 可切换博查 AI 搜索）"
+    except ImportError:
+        return "未安装 ddgs 库，请执行 `pip install ddgs`，或设置 BOCHA_API_KEY 走博查路径"
+    except Exception as e:
+        return f"DuckDuckGo 搜索异常：{e}\n（国内网络建议配置博查 API Key：set BOCHA_API_KEY=xxx）"
+
+
 def web_search(query: str, max_results: int = 3) -> str:
     """
-    调用博查 AI 搜索 API（优先），未配置 API key 时降级 DuckDuckGo。
+    调用博查 AI 搜索 API（优先），未配置 API key 或博查报错时降级 DuckDuckGo。
     国内访问稳定。
     """
     bocha_key = os.environ.get("BOCHA_API_KEY", "").strip()
@@ -46,26 +66,14 @@ def web_search(query: str, max_results: int = 3) -> str:
             return "博查返回空结果，请换关键词再试"
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else "?"
-            if status == 401:
-                return f"博查 API Key 无效（401），请检查 BOCHA_API_KEY 环境变量。错误：{e}"
-            return f"博查 API 出错（HTTP {status}）：{e}"
+            # 博查不可用（401/403 等）时降级到 DuckDuckGo，避免直接失败
+            return f"博查 API 出错（HTTP {status}），已降级到 DuckDuckGo：\n" + _duckduckgo_search(
+                query, max_results
+            )
         except Exception as e:
-            return f"博查搜索异常：{e}\n（未降级 DuckDuckGo，请检查网络连接）"
+            return f"博查搜索异常：{e}\n（已尝试降级 DuckDuckGo）\n" + _duckduckgo_search(
+                query, max_results
+            )
 
     # ---------- 路径 2：降级 DuckDuckGo ----------
-    try:
-        from ddgs import DDGS
-
-        results = DDGS().text(query, max_results=max_results)
-        if not results:
-            return "DuckDuckGo 返回空结果"
-        items = [
-            {"name": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")}
-            for r in results
-        ]
-        out = _format_results(items, max_results)
-        return out + "\n\n（提示：国内网络不稳定，配置 BOCHA_API_KEY 可切换博查 AI 搜索）"
-    except ImportError:
-        return "未安装 ddgs 库，请执行 `pip install ddgs`，或设置 BOCHA_API_KEY 走博查路径"
-    except Exception as e:
-        return f"DuckDuckGo 搜索异常：{e}\n（国内网络建议配置博查 API Key：set BOCHA_API_KEY=xxx）"
+    return _duckduckgo_search(query, max_results)

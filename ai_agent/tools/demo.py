@@ -4,15 +4,18 @@ import ast
 import operator
 
 
-def get_weather(city: str) -> str:
-    """模拟查询天气的工具"""
+def get_weather(city: str = "", location: str = "") -> str:
+    """模拟查询天气的工具。兼容模型偶尔传入的 location 别名。"""
+    target = city or location
+    if not target:
+        return "请提供城市名称（参数 city 或 location）"
     weather_data = {
         "北京": "晴天，25°C，湿度 40%",
         "上海": "多云，28°C，湿度 65%",
         "深圳": "阵雨，30°C，湿度 80%",
         "广州": "雷阵雨，32°C，湿度 85%",
     }
-    return weather_data.get(city, f"{city}：暂无天气数据")
+    return weather_data.get(target, f"{target}：暂无天气数据")
 
 
 def calculator(expression: str) -> str:
@@ -52,8 +55,6 @@ def calculator(expression: str) -> str:
             return _ALLOWED_OPS[op_type](_safe_eval(node.operand))
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
             return node.value
-        if isinstance(node, ast.Num):  # Python 3.7 兼容
-            return node.n
         # 以下类型一律拒绝：Name, Call, Attribute, Subscript, Lambda, ...
         raise ValueError(f"不支持的表达式元素: {type(node).__name__}")
 
