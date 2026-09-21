@@ -43,6 +43,9 @@ class Config:
     # Skill 定义文件目录（可选）。空字符串或目录不存在则跳过 Skill 加载。
     # 支持声明式 Markdown 文件作为复合工作流（Skill = 场景化 Prompt + 工具子集）。
     skill_dir: str = "skills"
+    # RAG 知识库扫描目录。Web UI / CLI 启动时递归扫描这些目录下的
+    # .md / .txt / .pdf 文件作为向量化知识源。多个目录用分号分隔。
+    rag_directories: tuple = ("docs/knowledge",)
 
     @classmethod
     def from_env(cls) -> Config:
@@ -70,4 +73,9 @@ class Config:
             mcp_servers=servers,
             mcp_allowed_tools=mcp_allowed_tools,
             skill_dir=os.environ.get("SKILL_DIR", cls.skill_dir),
+            rag_directories=tuple(
+                s.strip()
+                for s in os.environ.get("RAG_DIRECTORIES", ";".join(cls.rag_directories)).split(";")
+                if s.strip()
+            ),
         )

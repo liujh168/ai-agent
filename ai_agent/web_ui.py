@@ -170,7 +170,24 @@ class AgentApp:
                     cache_file=os.path.join(self.project_root, self.cfg.rag_cache_file),
                     request_timeout=self.cfg.request_timeout,
                 )
-                self.rag.build([os.path.join(self.project_root, "docs/通用Agent时代价值迁移.md")])
+                # 扫描 cfg.rag_directories 下的全部 .md / .txt / .pdf 文件
+                rag_paths: list[str] = []
+                for rel_dir in self.cfg.rag_directories:
+                    abs_dir = os.path.join(self.project_root, rel_dir)
+                    if not os.path.isdir(abs_dir):
+                        continue
+                    for root, _, files in os.walk(abs_dir):
+                        for fname in files:
+                            fpath = os.path.join(root, fname)
+                            ext = os.path.splitext(fname)[1].lower()
+                            if ext in (".md", ".txt", ".pdf"):
+                                rag_paths.append(fpath)
+                if rag_paths:
+                    self.rag.build(rag_paths)
+                    print(f"RAG 已加载 {len(rag_paths)} 个文件，共 {len(self.rag.chunks)} 个 chunks")
+                else:
+                    self.rag = None
+                    print("RAG 扫描目录为空或不存在，跳过初始化")
             except Exception as exc:
                 print(f"RAG 初始化失败: {exc}")
                 self.rag = None

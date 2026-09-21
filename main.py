@@ -60,12 +60,11 @@ configure_utf8_output()
 class AgentDemoApp:
     """交互式 Agent 演示应用：初始化环境、注册工具并运行自然语言交互循环。"""
 
-    # RAG 知识库数据源：支持 PDF / MD / TXT 三种格式
-    # 不存在的文件会在 build 时自动跳过
-    RAG_FILES = [
-        "data/AI-Agents-in-Depth-zh-CN.pdf",
-        "data/Hello-Agents-V1.0.3-20260717.pdf",
-        "docs/通用Agent时代价值迁移.md",
+    # RAG 知识库扫描目录：这些目录下的 .md / .txt / .pdf 文件会被递归扫描
+    # 不存在的目录会被跳过。也可通过 Config.rag_directories 覆盖。
+    RAG_DIRECTORIES = [
+        "docs/knowledge",
+        "data",
     ]
     TEST_IMAGE = "_test_chart.png"
     EXIT_WORDS = ("exit", "quit", "q", "退出")
@@ -134,9 +133,25 @@ class AgentDemoApp:
                 ),
                 request_timeout=self.cfg.request_timeout,
             )
-            files = [os.path.join(self.project_root, path) for path in self.RAG_FILES]
-            n_chunks = self.rag.build(files)
-            print(f"[OK] 知识库就绪：{n_chunks} 个文本片段")
+            # 扫描目录下的全部 .md / .txt / .pdf 文件
+            rag_dirs = list(self.cfg.rag_directories) if self.cfg.rag_directories else self.RAG_DIRECTORIES
+            rag_paths: list[str] = []
+            for rel_dir in rag_dirs:
+                abs_dir = os.path.join(self.project_root, rel_dir)
+                if not os.path.isdir(abs_dir):
+                    continue
+                for root, _, files in os.walk(abs_dir):
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext in (".md", ".txt", ".pdf"):
+                            rag_paths.append(fpath)
+            if rag_paths:
+                n_chunks = self.rag.build(rag_paths)
+                print(f"[OK] 知识库就绪：{len(rag_paths)} 个文件 → {n_chunks} 个文本片段")
+            else:
+                print("[WARN] RAG 扫描目录为空或不存在，跳过初始化")
+                self.rag = None
         except Exception as e:
             print(f"[WARN] RAG 初始化失败（{e}），知识库问答将不可用")
             self.rag = None

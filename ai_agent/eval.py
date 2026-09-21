@@ -7,7 +7,7 @@ Agent 评测集框架 — Agentic Eval Harness
   用统一的 Evaluator 逐条跑，自动评分并生成报告。
 
 为什么做这件事？
-  对应 docs/通用Agent时代价值迁移.md 中的观点：
+  对应 docs/knowledge/通用Agent时代价值迁移.md 中的观点：
   "评测工程是 Agent 上生产的必需品" — "从 demo 能用 → 生产可靠"，
   中间卡壳的不是模型能力，而是"怎么定义好"和"怎么自动验证好"。
 
@@ -699,7 +699,7 @@ def main() -> None:
         rag: RAGKnowledgeBase | None = None
         if not args.no_rag:
             print("ℹ️ 构建 RAG 知识库（可 --no-rag 跳过）...")
-            doc_src = os.path.join(project_root, "docs/通用Agent时代价值迁移.md")
+            doc_src = os.path.join(project_root, "docs/knowledge/通用Agent时代价值迁移.md")
             doc_dst = os.path.join(workspace, "knowledge.md")
             try:
                 shutil.copy2(doc_src, doc_dst)
