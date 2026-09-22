@@ -33,15 +33,24 @@ AgentRuntime.run()
 - `ai_agent/runtime.py`：统一工具调用循环与事件流
 - `ai_agent/events.py`：`AgentEvent` 事件类型
 - `ai_agent/tooling.py`：`ToolPolicy`、`ToolExecutor`
-- `ai_agent/app_core.py`：提示词、工具 schema、工具注册
+- `ai_agent/app_core.py`：提示词、工具 schema、工具注册（单一真相源）
 - `ai_agent/persistence.py`：线程安全的 SQLite 会话存储
 - `ai_agent/web_ui.py`：按浏览器隔离状态的 Gradio UI
+- `ai_agent/client.py`：LM Studio 客户端 + 高级 Agent 模式
+- `ai_agent/rag.py`：RAG 检索与安全缓存
+- `ai_agent/skill.py`：Skill 加载与关键词路由匹配
+- `ai_agent/mcp_client.py`：MCP Streamable HTTP 客户端
+- `ai_agent/config.py`：集中配置 + 环境变量覆盖
+- `ai_agent/multi_agent.py`：Planner / Executor / Critic 三角色协作
+- `ai_agent/eval.py`：20+ Gold Case 评测框架 + HTML 报告
+
+详细 API 见 [docs/project/API-接口文档.md](docs/project/API-接口文档.md)。
 
 ## 环境要求
 
 - Python 3.10-3.12
 - LM Studio 已启动 OpenAI 兼容服务
-- 已加载一个可进行聊天/工具调用的非 embedding 模型
+- 已加载一个可进行聊天/工具调用的非 embedding 模型（推荐 qwen3.5-9b / qwen3.6-35b）
 
 当前锁定的主要版本包括 Gradio 5.50.0、FastAPI 0.141.1、Starlette 0.52.1 和 OpenAI Python SDK 1.109.1。完整版本见 `requirements.lock` 与 `requirements-dev.lock`。
 
@@ -77,7 +86,7 @@ python -m ai_agent.web_ui
 
 ```powershell
 python -m ai_agent.web_ui --host 127.0.0.1 --port 7860
-python -m ai_agent.web_ui --share
+python -m ai_agent.web_ui --share          # 生成公网分享链接
 ```
 
 CLI：
@@ -88,25 +97,34 @@ python main.py
 python -m ai_agent
 ```
 
-代码执行和终端执行默认关闭。确需在本地演示时显式启用：
+### CLI 参数
 
-```powershell
-python main.py --enable-dangerous-tools
-```
+| 参数 | 说明 | 默认 |
+|------|------|------|
+| `--db DB_PATH` | SQLite 数据库路径 | `agent_sessions.db` |
+| `--enable-dangerous-tools` | 显式启用代码/终端执行 | `false` |
 
-每次执行危险工具前仍会要求人工确认。
+### Web UI 参数
+
+| 参数 | 说明 | 默认 |
+|------|------|------|
+| `--host` | 绑定地址 | `127.0.0.1` |
+| `--port` | 端口 | `7860` |
+| `--share` | 生成公网分享链接 | `false` |
+
+> 完整配置参考见 [docs/project/Config-配置参考.md](docs/project/Config-配置参考.md)。
 
 ## 安全默认值
 
 | 能力 | 默认策略 |
 | --- | --- |
 | `file_read/file_write` | 只能访问 `AGENT_WORKSPACE_ROOT` 内的路径 |
-| `sql_query` | 使用 SQLite 只读连接和 `query_only` |
+| `sql_query` | 使用 SQLite 只读连接（URI `mode=ro` + `PRAGMA query_only=ON`） |
 | `run_code/run_terminal` | 默认关闭，CLI 需显式启用并逐次确认 |
 | Web UI | 不开放代码和终端执行 |
 | `--share` | 关闭文件写入、执行型工具和 MCP |
 | MCP | 只有配置显式允许列表时才在 Web 中开放 |
-| Calculator | 限制表达式长度、指数和结果规模 |
+| Calculator | AST 白名单校验 + 指数/结果规模限制 |
 
 Web 和 CLI 中的 `human_confirm` 只是教学示例，真正的权限控制由 `ToolExecutor` 在工具执行前完成。
 
@@ -123,10 +141,11 @@ Web 和 CLI 中的 `human_confirm` 只是教学示例，真正的权限控制由
 | `EMBED_MODEL` | RAG embedding 模型 | `text-embedding-nomic-embed-text-v1.5` |
 | `RAG_CHUNK_SIZE` | RAG 分块字符数 | `500` |
 | `RAG_CHUNK_OVERLAP` | RAG 分块重叠字符数 | `50` |
+| `RAG_DIRECTORIES` | RAG 知识扫描目录，分号分隔 | `docs/knowledge` |
 | `AGENT_WORKSPACE_ROOT` | 文件工具允许访问的根目录 | 项目根目录 |
 | `ENABLE_DANGEROUS_TOOLS` | 环境变量方式启用危险工具 | `false` |
-| `MCP_SERVERS` | MCP URL，使用分号分隔 | 空 |
-| `MCP_ALLOWED_TOOLS` | Web 允许的 MCP 工具，使用分号分隔 | 空 |
+| `MCP_SERVERS` | MCP URL，分号分隔 | 空 |
+| `MCP_ALLOWED_TOOLS` | Web 允许的 MCP 工具，分号分隔 | 空 |
 | `SKILL_DIR` | Skill Markdown 目录 | `skills` |
 
 ## 测试与检查
@@ -159,22 +178,41 @@ python -m ai_agent.eval --enable-dangerous-tools
 
 ```text
 ai_agent/
-  app_core.py       # 提示词、工具 schema、注册与策略工厂
-  client.py         # LM Studio 客户端与高级 Agent 模式
-  runtime.py        # 统一事件式工具循环
-  events.py         # AgentEvent
-  tooling.py        # ToolPolicy / ToolExecutor
-  persistence.py    # SQLite 会话持久化
-  rag.py            # RAG 检索与安全缓存
-  skill.py          # Skill 加载与匹配
-  mcp_client.py     # MCP Streamable HTTP 客户端
-  multi_agent.py    # Planner / Executor / Critic
-  web_ui.py         # Gradio Web UI
+  app_core.py       # 提示词、工具 schema、注册与策略工厂（单一真相源）
+  client.py         # LM Studio 客户端 + 高级 Agent 模式（ReAct/Reflexion/Plan 等）
+  runtime.py        # 统一事件式工具循环（CLI / Web UI 共用）
+  events.py         # AgentEvent 类型（frozen dataclass）
+  tooling.py        # ToolPolicy（风险四级分类）/ ToolExecutor（执行前拦截）
+  config.py         # 集中配置 + 环境变量覆盖
+  persistence.py    # 线程安全的 SQLite 会话存储
+  rag.py            # RAG 检索（余弦相似度 + JSON 缓存 + 原子写入）
+  skill.py          # Skill 加载（Markdown Frontmatter）+ 关键词路由匹配
+  mcp_client.py     # MCP Streamable HTTP 客户端（极简实现）
+  multi_agent.py    # Planner / Executor / Critic 三角色协作
+  web_ui.py         # Gradio Web UI（per-browser State + threading.local）
   tests/            # 离线单元与契约测试
+tools/              # 模块级纯工具（无依赖，可独立测试）
+  demo.py           # get_weather, calculator
+  fs.py             # file_read, file_write
+  search.py         # web_search
+  sql.py            # sql_query
+  system.py         # run_terminal, run_code, human_confirm
 docs/
-  ...               # 教学文档
+  README.md                        # 文档总索引
+  project/                         # 项目自身技术文档
+    API-接口文档.md                # 21 个工具详解
+    Config-配置参考.md             # 15 个配置项详解
+    Quickstart-快速上手.md         # 10 分钟跑通
+    架构总览.md                   # ASCII 架构图 + 模块关系
+    开发指南-Contributing.md       # 如何扩展工具/Skill/评测
+    FAQ-故障排查.md               # 常见问题排查
+    设计决策清单.md                # 34 条设计决策
+    Skill实现本质原理.md           # Skill 专题
+    ai-agent-learning-roadmap.html # 学习路线图
+  knowledge/                       # 外部知识源（RAG 扫描源）
+  blog/                            # 开发博客（5 篇 WordPress 系列）
 skills/
-  example_plan.md   # Skill 示例
+  example_plan.md                  # Skill 示例：规划写作工作流
 ```
 
 ## License
