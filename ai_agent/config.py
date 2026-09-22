@@ -46,6 +46,12 @@ class Config:
     # RAG 知识库扫描目录。Web UI / CLI 启动时递归扫描这些目录下的
     # .md / .txt / .pdf 文件作为向量化知识源。多个目录用分号分隔。
     rag_directories: tuple = ("docs/knowledge",)
+    # WordPress REST API 凭证（可选，供 wordpress-publish Skill 使用）。
+    # wp_url 填站点根地址，例如 https://blog.liujh18.com
+    # wp_app_password 在后台「用户→个人资料」生成的 Application Password，格式如
+    #   username xxxx xxxx xxxx xxxx
+    wp_url: str = ""
+    wp_app_password: str = ""
 
     @classmethod
     def from_env(cls) -> Config:
@@ -78,4 +84,6 @@ class Config:
                 for s in os.environ.get("RAG_DIRECTORIES", ";".join(cls.rag_directories)).split(";")
                 if s.strip()
             ),
+            wp_url=os.environ.get("WP_URL", cls.wp_url),
+            wp_app_password=os.environ.get("WP_APP_PASSWORD", cls.wp_app_password),
         )

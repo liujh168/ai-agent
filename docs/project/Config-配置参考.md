@@ -24,6 +24,8 @@
 | `mcp_allowed_tools` | `MCP_ALLOWED_TOOLS` | `()` | tuple[str,...] | Web UI 允许的 MCP 工具；分号分隔 |
 | `skill_dir` | `SKILL_DIR` | `skills` | str | Skill Markdown 定义目录（为空或不存在则跳过） |
 | `rag_directories` | `RAG_DIRECTORIES` | `("docs/knowledge",)` | tuple[str,...] | RAG 知识扫描目录；分号分隔；递归扫描 .md/.txt/.pdf |
+| `wp_url` | `WP_URL` | `""` | str | WordPress 站点根地址（如 `https://blog.liujh18.com`），供 wordpress-publish Skill 使用 |
+| `wp_app_password` | `WP_APP_PASSWORD` | `""` | str | WordPress Application Password（后台用户页生成），Basic Auth 用 |
 
 ---
 
@@ -89,6 +91,26 @@ AGENT_WORKSPACE_ROOT=C:/Users/me/Documents/agent_workspace
 MCP_SERVERS=https://mcp.example.com/tools;http://localhost:9000/sse
 MCP_ALLOWED_TOOLS=mcp_0_query;mcp_0_list
 ```
+
+### WordPress 博客发布（可选）
+
+| 字段 | 环境变量 | 默认值 |
+|------|---------|--------|
+| `wp_url` | `WP_URL` | `""` |
+| `wp_app_password` | `WP_APP_PASSWORD` | `""` |
+
+**使用步骤**：
+
+1. 登录 WordPress 后台 → 用户 → 个人资料 → 滚动到 **Application Passwords**
+2. 输入应用名（如 `ai-agent`）→ 添加新应用密码 → 复制生成的密码（格式：`username xxxx xxxx xxxx xxxx`）
+3. `.env` 里填：
+
+```bash
+WP_URL=https://blog.liujh18.com
+WP_APP_PASSWORD=admin abc1 def2 ghi3 jkl4
+```
+
+4. 启动 Agent，触发词"投稿"/"发博客" → `wordpress-publish` Skill 自动激活
 
 ### Skill 与安全
 
