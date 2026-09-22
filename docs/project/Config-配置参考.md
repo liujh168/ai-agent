@@ -25,6 +25,7 @@
 | `skill_dir` | `SKILL_DIR` | `skills` | str | Skill Markdown 定义目录（为空或不存在则跳过） |
 | `rag_directories` | `RAG_DIRECTORIES` | `("docs/knowledge",)` | tuple[str,...] | RAG 知识扫描目录；分号分隔；递归扫描 .md/.txt/.pdf |
 | `wp_url` | `WP_URL` | `""` | str | WordPress 站点根地址（如 `https://blog.liujh18.com`），供 wordpress-publish Skill 使用 |
+| `wp_user` | `WP_USER` | `""` | str | WordPress 用户名（可选）；为空时自动从 WP_APP_PASSWORD 格式 `username xxxx` 空格拆分取第一段 |
 | `wp_app_password` | `WP_APP_PASSWORD` | `""` | str | WordPress Application Password（后台用户页生成），Basic Auth 用 |
 
 ---

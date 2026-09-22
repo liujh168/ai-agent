@@ -51,6 +51,7 @@ class Config:
     # wp_app_password 在后台「用户→个人资料」生成的 Application Password，格式如
     #   username xxxx xxxx xxxx xxxx
     wp_url: str = ""
+    wp_user: str = ""  # WordPress 用户名。为空时尝试从 wp_app_password 空格分隔解析
     wp_app_password: str = ""
 
     @classmethod
@@ -85,5 +86,6 @@ class Config:
                 if s.strip()
             ),
             wp_url=os.environ.get("WP_URL", cls.wp_url),
+            wp_user=os.environ.get("WP_USER", cls.wp_user),
             wp_app_password=os.environ.get("WP_APP_PASSWORD", cls.wp_app_password),
         )

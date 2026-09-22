@@ -37,8 +37,8 @@ class TestAppCore:
         assert "结构化" in SYSTEM_PROMPT
 
     def test_tool_count_consistent(self):
-        """TOOL_COUNT 应等于 TOOL_SCHEMAS 实际长度（单一真相源，避免 18/20/21 漂移）"""
-        assert TOOL_COUNT == len(TOOL_SCHEMAS) == 21
+        """TOOL_COUNT 应等于 TOOL_SCHEMAS 实际长度（单一真相源，避免 18/20/21/22 漂移）"""
+        assert TOOL_COUNT == len(TOOL_SCHEMAS) == 22
 
     def test_tool_schemas_match_build_tool_map(self):
         """TOOL_SCHEMAS 的每一个工具名都能在 build_tool_map 中找到实现"""

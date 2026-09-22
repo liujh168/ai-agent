@@ -28,6 +28,7 @@ from ai_agent.tools import (
     sql_query,
     web_search,
 )
+from ai_agent.tools.wordpress import wp_publish as _wp_publish_impl
 
 # ============================================================
 # 系统提示词（自然语言 → 工具路由的"真相源"）
@@ -56,6 +57,7 @@ BASE_SYSTEM_PROMPT = (
     "- 用户要求【Few-shot/示例演示/Prompt Engineering/提示词工程/给我几个示例】时，调用 demo_few_shot；\n"
     "- 用户要求【压缩/摘要/总结对话/缩短历史】时，调用 summarize_history；\n"
     "- 用户要求【多 Agent/多智能体/Planner/Executor/Critic/角色协作/分工协作】时，调用 run_multi_agent（Planner 拆任务 → Executor 执行 → Critic 评审）；\n"
+    "- 用户要求【投稿/发布到博客/发 WordPress 文章/上传到博客】时，调用 wp_publish（优先传 md_file 文件路径，自动解析 Markdown→HTML 和 Front Matter；可选 status 默认 draft 草稿）；\n"
     "- 用户要求【规划任务/拆解任务/分步骤完成复杂任务/写大纲并展开/规划并写一篇文章】时，调用 plan_task；\n"
     "- 用户要求【提取结构化信息/抽取字段/生成 JSON 数据/结构化输出】时，调用 extract_structured；\n"
     "- 执行敏感/破坏性操作前（删除覆盖文件、写入重要数据、SQL DDL/DML、终端写入命令），必须先调用 human_confirm 让用户确认；\n"
@@ -397,6 +399,50 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "wp_publish",
+            "description": "把 Markdown 文件或 HTML 内容发布到 WordPress 博客。当用户要求投稿、发布到博客、发 WordPress 文章、上传到博客时调用。推荐优先用 md_file 传文件路径（工具自动解析 Front Matter + Markdown→HTML + 分类/标签推断）；也可直接传 title + content_html（HTML 格式正文）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "md_file": {
+                        "type": "string",
+                        "description": "本地 Markdown 文件路径（推荐）。工具会自动解析 Front Matter 和 Markdown→HTML",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "文章标题（纯文本）。md_file 模式下会从文件自动提取",
+                    },
+                    "content_html": {
+                        "type": "string",
+                        "description": "文章正文（HTML 格式，WordPress 原生支持）",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "发布状态。默认 draft（草稿，人工审阅后手动发布）。用户明确说'直接发布'时才用 publish",
+                        "enum": ["draft", "publish", "pending", "private", "future"],
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "分类名列表（不存在会自动创建）",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "标签名列表（不存在会自动创建）",
+                    },
+                    "excerpt": {
+                        "type": "string",
+                        "description": "文章摘要（不填自动生成）",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -567,6 +613,27 @@ def build_tool_map(
     tool_map["extract_structured"] = extract_structured
     tool_map["demo_few_shot"] = demo_few_shot
     tool_map["run_multi_agent"] = run_multi_agent_tool
+
+    def wp_publish_tool(
+        md_file: str = "",
+        title: str = "",
+        content_html: str = "",
+        status: str = "draft",
+        categories: list | None = None,
+        tags: list | None = None,
+        excerpt: str = "",
+    ) -> str:
+        return _wp_publish_impl(
+            md_file=md_file,
+            title=title,
+            content_html=content_html,
+            status=status,
+            categories=categories,
+            tags=tags,
+            excerpt=excerpt,
+        )
+
+    tool_map["wp_publish"] = wp_publish_tool
 
     # summarize_history 需要读写 App 自身的 history，仅在提供访问器时注册
     if get_history is not None:
