@@ -27,6 +27,7 @@ if _WP_PUBLISHER_DIR not in sys.path and os.path.isdir(_WP_PUBLISHER_DIR):
 try:
     from wp_auto_publisher import (  # noqa: E402  — 必须在 sys.path insert 之后
         WordPressClient,
+        _load_dotenv as _wp_load_dotenv,
         parse_markdown_file,
         _infer_excerpt,
         insert_more_tag,
@@ -39,6 +40,30 @@ except ImportError:
     parse_markdown_file = None  # type: ignore
     _infer_excerpt = None  # type: ignore
     insert_more_tag = None  # type: ignore
+    _wp_load_dotenv = None  # type: ignore
+
+# 模块级标记：是否已把 skills/wordpress-publish/.env 载入 os.environ
+# （只在首次 wp_publish 调用时加载一次，避免多次 IO + 保证 override=False 语义）
+_wp_env_loaded = False
+
+
+def _ensure_wp_env_loaded() -> None:
+    """
+    加载 skills/wordpress-publish/.env 到 os.environ（仅补空，不覆盖已有值）。
+    优先级：系统环境变量 > 项目根 .env > skills/wordpress-publish/.env
+    """
+    global _wp_env_loaded
+    if _wp_env_loaded or not _WP_AUTO_PUBLISHER_AVAILABLE:
+        return
+    _wp_env_loaded = True
+    dotenv_path = os.path.join(_WP_PUBLISHER_DIR, ".env")
+    if not os.path.isfile(dotenv_path):
+        return
+    env_dict = _wp_load_dotenv(dotenv_path)
+    for key, value in env_dict.items():
+        # override=False：如果 os.environ 里已有值（根目录 .env 或系统环境变量），不覆盖
+        if key and value and key not in os.environ:
+            os.environ[key] = value
 
 
 def _resolve_wp_user(wp_user: str, wp_app_password: str) -> str:
@@ -79,12 +104,13 @@ def wp_publish(
       wp_publish(md_file="docs/blog/05.md", status="draft")
       wp_publish(title="我的标题", content_html="<h2>...</h2><p>...</p>", status="publish")
     """
-    # ── 0. 依赖检查 ──
+    # ── 0. 依赖检查 + 加载 skills/wordpress-publish/.env ──
     if not _WP_AUTO_PUBLISHER_AVAILABLE:
         return (
             "❌ WordPress 发布模块不可用。请确认 skills/wordpress-publish/ 目录存在，"
             "并安装依赖：pip install markdown python-frontmatter"
         )
+    _ensure_wp_env_loaded()
 
     # ── 1. 凭证校验（闭包注入优先，否则 fallback 环境变量） ──
     wp_url = (cfg_wp_url or os.environ.get("WP_URL", "")).strip()
