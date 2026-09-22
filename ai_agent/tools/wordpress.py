@@ -113,7 +113,21 @@ def wp_publish(
     try:
         if md_file.strip():
             # 模式 A：解析 Markdown 文件
-            post_data = parse_markdown_file(Path(md_file.strip()))
+            # parse_markdown_file 内部做 relative_to(CONFIG["posts_dir"])，
+            # 如果 md_file 不在默认的 ./posts 目录下会抛 ValueError，
+            # 这里临时把 posts_dir 改成 md_file 的父目录。
+            md_path = Path(md_file.strip()).resolve()
+            original_posts_dir = None
+            if _WP_AUTO_PUBLISHER_AVAILABLE:
+                import wp_auto_publisher as _wp  # noqa: E402
+
+                original_posts_dir = _wp.CONFIG.get("posts_dir")
+                _wp.CONFIG["posts_dir"] = str(md_path.parent)
+            try:
+                post_data = parse_markdown_file(md_path)
+            finally:
+                if original_posts_dir is not None:
+                    _wp.CONFIG["posts_dir"] = original_posts_dir
             post_data["status"] = status
             if categories is not None:
                 post_data["categories"] = categories
