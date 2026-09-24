@@ -147,6 +147,7 @@ Web 和 CLI 中的 `human_confirm` 只是教学示例，真正的权限控制由
 | `MCP_SERVERS` | MCP URL，分号分隔 | 空 |
 | `MCP_ALLOWED_TOOLS` | Web 允许的 MCP 工具，分号分隔 | 空 |
 | `SKILL_DIR` | Skill Markdown 目录 | `skills` |
+| `HISTORY_MAX_CHARS` | 对话历史自动压缩阈值（字符数） | `5000` |
 
 ## 测试与检查
 
@@ -179,29 +180,34 @@ python -m ai_agent.eval --enable-dangerous-tools
 ```text
 ai_agent/
   app_core.py       # 提示词、工具 schema、注册与策略工厂（单一真相源）
-  client.py         # LM Studio 客户端 + 高级 Agent 模式（ReAct/Reflexion/Plan 等）
+  client.py         # LM Studio 客户端（演示算法薄委托，实现在 demos/）
+  demos/            # 演示算法包：ReAct / 思维链 / 原生推理 / 反思 / 规划 / 结构化提取
   runtime.py        # 统一事件式工具循环（CLI / Web UI 共用）
   events.py         # AgentEvent 类型（frozen dataclass）
-  tooling.py        # ToolPolicy（风险四级分类）/ ToolExecutor（执行前拦截）
-  config.py         # 集中配置 + 环境变量覆盖
+  tooling.py        # ToolPolicy（read/write/execute/mcp/network 五级风险分类）/ ToolExecutor
+  config.py         # 集中配置 + 环境变量覆盖 + load_env()
   persistence.py    # 线程安全的 SQLite 会话存储
-  rag.py            # RAG 检索（余弦相似度 + JSON 缓存 + 原子写入）
+  rag.py            # RAG 检索（余弦相似度 + JSON 缓存 + 原子写入 + collect_rag_files）
   skill.py          # Skill 加载（Markdown Frontmatter）+ 关键词路由匹配
   mcp_client.py     # MCP Streamable HTTP 客户端（极简实现）
   multi_agent.py    # Planner / Executor / Critic 三角色协作
   web_ui.py         # Gradio Web UI（per-browser State + threading.local）
+  eval.py           # Gold Case 离线评测框架
+  eval_report_template.html  # 评测 HTML 报告模板（string.Template 占位符）
+  console.py        # Windows 控制台 UTF-8 适配
+  tools/            # 模块级纯工具（无依赖，可独立测试）
+    demo.py         # get_weather, calculator
+    fs.py           # file_read, file_write
+    search.py       # web_search
+    sql.py          # sql_query
+    system.py       # run_terminal, run_code, human_confirm
+    wordpress.py    # wp_publish（薄包装 skills/wordpress-publish/）
   tests/            # 离线单元与契约测试
-tools/              # 模块级纯工具（无依赖，可独立测试）
-  demo.py           # get_weather, calculator
-  fs.py             # file_read, file_write
-  search.py         # web_search
-  sql.py            # sql_query
-  system.py         # run_terminal, run_code, human_confirm
 docs/
   README.md                        # 文档总索引
   project/                         # 项目自身技术文档
-    API-接口文档.md                # 21 个工具详解
-    Config-配置参考.md             # 15 个配置项详解
+    API-接口文档.md                # 工具详解
+    Config-配置参考.md             # 配置项详解
     Quickstart-快速上手.md         # 10 分钟跑通
     架构总览.md                   # ASCII 架构图 + 模块关系
     开发指南-Contributing.md       # 如何扩展工具/Skill/评测
@@ -213,6 +219,8 @@ docs/
   blog/                            # 开发博客（5 篇 WordPress 系列）
 skills/
   example_plan.md                  # Skill 示例：规划写作工作流
+  wordpress-publish.md             # Skill：WordPress 博客发布
+  wordpress-publish/               # 可移植的 WordPress 发布器（wp_auto_publisher.py）
 ```
 
 ## License

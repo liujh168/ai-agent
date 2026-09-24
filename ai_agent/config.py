@@ -21,6 +21,45 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"环境变量 {name} 需要整数值，当前为 {raw!r}，请修正 .env 后重试") from None
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(f"环境变量 {name} 需要数值，当前为 {raw!r}，请修正 .env 后重试") from None
+
+
+_loaded_env_files: set[str] = set()
+
+
+def load_env(path: str | None = None) -> bool:
+    """
+    加载 .env 到 os.environ（幂等；不覆盖已有变量，优先级：系统环境变量 > .env）。
+    path 默认为项目根目录的 .env。未安装 python-dotenv 时静默跳过并返回 False。
+    """
+    dotenv_path = path or os.path.join(_PROJECT_ROOT, ".env")
+    if dotenv_path in _loaded_env_files:
+        return True
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return False
+    _loaded_env_files.add(dotenv_path)
+    return bool(load_dotenv(dotenv_path, override=False))
+
+
 @dataclass(frozen=True)
 class Config:
     """运行时配置（不可变）。默认值可直接被环境变量覆盖。"""
@@ -36,6 +75,8 @@ class Config:
     workspace_root: str = _PROJECT_ROOT
     request_timeout: float = 120.0
     enable_dangerous_tools: bool = False
+    # 长对话压缩阈值：history 总字符数超过该值时自动摘要压缩
+    history_max_chars: int = 5000
     # MCP 服务器 URL 列表（可选）。多个用分号分隔，例如:
     #   MCP_SERVERS=https://mcp.example.com/tools;http://localhost:9000/sse
     mcp_servers: tuple = ()
@@ -47,7 +88,7 @@ class Config:
     # .md / .txt / .pdf 文件作为向量化知识源。多个目录用分号分隔。
     rag_directories: tuple = ("docs/knowledge",)
     # WordPress REST API 凭证（可选，供 wordpress-publish Skill 使用）。
-    # wp_url 填站点根地址，例如 https://blog.liujh18.com
+    # wp_url 填站点根地址，例如 https://example.com
     # wp_app_password 在后台「用户→个人资料」生成的 Application Password，格式如
     #   username xxxx xxxx xxxx xxxx
     wp_url: str = ""
@@ -67,12 +108,13 @@ class Config:
             api_key=os.environ.get("LM_STUDIO_API_KEY", cls.api_key),
             model=os.environ.get("LM_STUDIO_MODEL", cls.model),
             embed_model=os.environ.get("EMBED_MODEL", cls.embed_model),
-            chunk_size=int(os.environ.get("RAG_CHUNK_SIZE", cls.chunk_size)),
-            chunk_overlap=int(os.environ.get("RAG_CHUNK_OVERLAP", cls.chunk_overlap)),
+            chunk_size=_env_int("RAG_CHUNK_SIZE", cls.chunk_size),
+            chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", cls.chunk_overlap),
             rag_cache_file=os.environ.get("RAG_CACHE_FILE", cls.rag_cache_file),
             project_root=os.environ.get("PROJECT_ROOT", cls.project_root),
             workspace_root=os.environ.get("AGENT_WORKSPACE_ROOT") or cls.workspace_root,
-            request_timeout=float(os.environ.get("LM_STUDIO_TIMEOUT", cls.request_timeout)),
+            request_timeout=_env_float("LM_STUDIO_TIMEOUT", cls.request_timeout),
+            history_max_chars=_env_int("HISTORY_MAX_CHARS", cls.history_max_chars),
             enable_dangerous_tools=_env_bool(
                 "ENABLE_DANGEROUS_TOOLS",
                 cls.enable_dangerous_tools,

@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import os
 import sys
-from functools import wraps
 from pathlib import Path
-from typing import Callable
 
 import requests
+
+from ai_agent.config import load_env
+
+from .fs import resolve_workspace_path
 
 # ── 把 skills/wordpress-publish/ 加入 import 路径 ──
 _PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
@@ -27,10 +29,9 @@ if _WP_PUBLISHER_DIR not in sys.path and os.path.isdir(_WP_PUBLISHER_DIR):
 try:
     from wp_auto_publisher import (  # noqa: E402  — 必须在 sys.path insert 之后
         WordPressClient,
-        _load_dotenv as _wp_load_dotenv,
-        parse_markdown_file,
         _infer_excerpt,
         insert_more_tag,
+        parse_markdown_file,
     )
 
     _WP_AUTO_PUBLISHER_AVAILABLE = True
@@ -40,11 +41,6 @@ except ImportError:
     parse_markdown_file = None  # type: ignore
     _infer_excerpt = None  # type: ignore
     insert_more_tag = None  # type: ignore
-    _wp_load_dotenv = None  # type: ignore
-
-# 模块级标记：是否已把 skills/wordpress-publish/.env 载入 os.environ
-# （只在首次 wp_publish 调用时加载一次，避免多次 IO + 保证 override=False 语义）
-_wp_env_loaded = False
 
 
 def _ensure_wp_env_loaded() -> None:
@@ -52,18 +48,8 @@ def _ensure_wp_env_loaded() -> None:
     加载 skills/wordpress-publish/.env 到 os.environ（仅补空，不覆盖已有值）。
     优先级：系统环境变量 > 项目根 .env > skills/wordpress-publish/.env
     """
-    global _wp_env_loaded
-    if _wp_env_loaded or not _WP_AUTO_PUBLISHER_AVAILABLE:
-        return
-    _wp_env_loaded = True
-    dotenv_path = os.path.join(_WP_PUBLISHER_DIR, ".env")
-    if not os.path.isfile(dotenv_path):
-        return
-    env_dict = _wp_load_dotenv(dotenv_path)
-    for key, value in env_dict.items():
-        # override=False：如果 os.environ 里已有值（根目录 .env 或系统环境变量），不覆盖
-        if key and value and key not in os.environ:
-            os.environ[key] = value
+    if _WP_AUTO_PUBLISHER_AVAILABLE:
+        load_env(os.path.join(_WP_PUBLISHER_DIR, ".env"))
 
 
 def _resolve_wp_user(wp_user: str, wp_app_password: str) -> str:
@@ -92,6 +78,7 @@ def wp_publish(
     cfg_wp_url: str = "",
     cfg_wp_user: str = "",
     cfg_wp_app_password: str = "",
+    cfg_workspace_root: str = "",
 ) -> str:
     """
     WordPress 博客发布 Agent 工具。
@@ -138,11 +125,16 @@ def wp_publish(
     # ── 3. 构造 post_data ──
     try:
         if md_file.strip():
-            # 模式 A：解析 Markdown 文件
+            # 模式 A：解析 Markdown 文件（限制在工作区内，防止 LLM 读任意本地文件上传公网）
+            safe_path, path_error = resolve_workspace_path(
+                md_file.strip(), cfg_workspace_root or None
+            )
+            if path_error or safe_path is None:
+                return f"❌ {path_error or '安全限制：路径解析失败'}"
             # parse_markdown_file 内部做 relative_to(CONFIG["posts_dir"])，
             # 如果 md_file 不在默认的 ./posts 目录下会抛 ValueError，
             # 这里临时把 posts_dir 改成 md_file 的父目录。
-            md_path = Path(md_file.strip()).resolve()
+            md_path = safe_path
             original_posts_dir = None
             if _WP_AUTO_PUBLISHER_AVAILABLE:
                 import wp_auto_publisher as _wp  # noqa: E402

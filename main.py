@@ -4,7 +4,7 @@
 架构：
   ai_agent/client.py   → LMStudioClient（与 LM Studio API 直接交互）
   ai_agent/rag.py      → RAGKnowledgeBase（PDF/MD/TXT 向量化检索）
-  ai_agent/tools/      → 10 个模块级工具函数 + 9 个 TOOL schema
+  ai_agent/tools/      → 模块级工具函数（schema 统一在 app_core.TOOL_SCHEMAS）
   main.py              → AgentDemoApp（初始化 + 工具注册 + 交互循环）
 
 运行：python main.py  或  python -m ai_agent
@@ -13,17 +13,11 @@
       在 .env 中设置 BOCHA_API_KEY=xxx（博查 AI 搜索，国内稳定）
 """
 
-# ---------- 加载 .env 环境变量 ----------
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except ImportError:
-    pass  # 未安装 python-dotenv 时跳过（仍可通过系统环境变量配置）
-
 import logging
 import os
 import time
+
+import requests
 
 from ai_agent.app_core import (
     SYSTEM_PROMPT as _CORE_SYSTEM_PROMPT,
@@ -34,13 +28,18 @@ from ai_agent.app_core import (
     build_system_prompt,
     build_tool_executor,
     build_tool_map,
+    compress_and_persist_history,
+    ensure_test_image,
     filter_tool_schemas,
 )
 from ai_agent.client import LMStudioClient
-from ai_agent.config import Config
+from ai_agent.config import Config, load_env
 from ai_agent.console import configure_utf8_output
 from ai_agent.persistence import DEFAULT_DB_PATH, ChatStore
-from ai_agent.rag import RAGKnowledgeBase
+from ai_agent.rag import RAGKnowledgeBase, collect_rag_files
+
+# ---------- 加载 .env 环境变量（幂等；未安装 python-dotenv 时静默跳过） ----------
+load_env()
 
 # ---------- 日志配置 ----------
 logging.basicConfig(
@@ -68,9 +67,6 @@ class AgentDemoApp:
     ]
     TEST_IMAGE = "_test_chart.png"
     EXIT_WORDS = ("exit", "quit", "q", "退出")
-
-    # 长对话压缩阈值：history 总字符数超这个值就自动摘要压缩
-    HISTORY_MAX_CHARS = 5000
 
     # 系统提示词与工具 schema 统一引用 app_core（单一真相源）
     SYSTEM_PROMPT = _CORE_SYSTEM_PROMPT
@@ -135,49 +131,23 @@ class AgentDemoApp:
             )
             # 扫描目录下的全部 .md / .txt / .pdf 文件
             rag_dirs = list(self.cfg.rag_directories) if self.cfg.rag_directories else self.RAG_DIRECTORIES
-            rag_paths: list[str] = []
-            for rel_dir in rag_dirs:
-                abs_dir = os.path.join(self.project_root, rel_dir)
-                if not os.path.isdir(abs_dir):
-                    continue
-                for root, _, files in os.walk(abs_dir):
-                    for fname in files:
-                        fpath = os.path.join(root, fname)
-                        ext = os.path.splitext(fname)[1].lower()
-                        if ext in (".md", ".txt", ".pdf"):
-                            rag_paths.append(fpath)
+            rag_paths = collect_rag_files(self.project_root, rag_dirs)
             if rag_paths:
                 n_chunks = self.rag.build(rag_paths)
                 print(f"[OK] 知识库就绪：{len(rag_paths)} 个文件 → {n_chunks} 个文本片段")
             else:
                 print("[WARN] RAG 扫描目录为空或不存在，跳过初始化")
                 self.rag = None
-        except Exception as e:
+        except (requests.RequestException, RuntimeError, OSError, ValueError, KeyError) as e:
+            log.warning("RAG 初始化失败: %s", e)
             print(f"[WARN] RAG 初始化失败（{e}），知识库问答将不可用")
             self.rag = None
 
     def _create_test_image(self) -> None:
         """用 Pillow 生成一张测试图表，供图像识别演示（已存在则跳过）"""
         image_path = os.path.join(self.project_root, self.TEST_IMAGE)
-        if os.path.exists(image_path):
-            log.debug("测试图片已存在，跳过生成")
-            return
-        try:
-            from PIL import Image, ImageDraw
-
-            img = Image.new("RGB", (640, 400), "white")
-            draw = ImageDraw.Draw(img)
-            data = [("AI Agent", 120), ("RAG", 200), ("Agentic", 160), ("Multi-Agent", 90)]
-            x = 60
-            for label, h in data:
-                draw.rectangle([x, 400 - h, x + 120, 400], fill="steelblue")
-                draw.text((x + 20, 400 - h - 25), label, fill="black")
-                x += 140
-            draw.text((20, 20), "2026 AI Field Attention Survey", fill="black")
-            img.save(image_path)
+        if ensure_test_image(image_path):
             print(f"[OK] 已生成测试图片 {image_path} 供图像识别演示")
-        except Exception as e:
-            print(f"[WARN] 测试图片生成失败（{e}），图像识别演示将不可用")
 
     def _register_tools(self) -> None:
         """注册演示工具（统一调用 app_core.build_tool_map 构建工具映射）"""
@@ -197,6 +167,7 @@ class AgentDemoApp:
             confirm_write=True,
             confirm_execute=True,
             confirm_mcp=True,
+            confirm_network=True,
             mcp_allowlist=self.cfg.mcp_allowed_tools,
             confirm=self._confirm_tool,
         )
@@ -227,19 +198,11 @@ class AgentDemoApp:
         skill_dir = self.cfg.skill_dir
         if not skill_dir:
             return
+        from ai_agent.skill import create_skill_registry
+
         # 解析为相对 main.py 所在目录的绝对路径
         abs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), skill_dir)
-        if not os.path.isdir(abs_dir):
-            log.info("Skill 目录不存在（%s），跳过 Skill 加载", abs_dir)
-            return
-        try:
-            from ai_agent.skill import SkillRegistry
-
-            available = list(self.tool_map.keys())
-            self.skill_registry = SkillRegistry(abs_dir, available)
-        except Exception as e:
-            log.warning("SkillRegistry 初始化失败: %s", e)
-            self.skill_registry = None
+        self.skill_registry = create_skill_registry(abs_dir, list(self.tool_map.keys()))
 
     def _print_banner(self) -> None:
         """打印启动 banner 与示例"""
@@ -333,21 +296,16 @@ class AgentDemoApp:
 
                 # ===== 长对话自动摘要压缩 =====
                 total_chars = sum(len(m.get("content") or "") for m in self.history)
-                if total_chars > self.HISTORY_MAX_CHARS:
+                if total_chars > self.cfg.history_max_chars:
                     print(
-                        f"\n[系统] 对话历史已达 {total_chars} 字符（阈值 {self.HISTORY_MAX_CHARS}），自动压缩中..."
+                        f"\n[系统] 对话历史已达 {total_chars} 字符"
+                        f"（阈值 {self.cfg.history_max_chars}），自动压缩中..."
                     )
-                    self.history = self.client.summarize_messages(self.history, keep_recent=4)
+                    self.history = compress_and_persist_history(
+                        self.client, self.history, self.store, self.session_id
+                    )
                     now_chars = sum(len(m.get("content") or "") for m in self.history)
                     print(f"[系统] 压缩完成，剩余 {now_chars} 字符（保留最近 4 条完整消息）")
-                    # 压缩后清除持久化，只保存最近完整消息 + 新摘要
-                    if self.session_id:
-                        self.store.clear_messages(self.session_id)
-                        # 重写当前 history（去掉 system）
-                        for m in self.history[1:]:
-                            self.store.append(
-                                self.session_id, m["role"], m.get("content", ""), m.get("tool_calls")
-                            )
             except RuntimeError as e:
                 print(f"[ERROR] {e}")
                 self.history.pop()
@@ -395,7 +353,7 @@ class AgentDemoApp:
 
     def _try_session_command(self, text: str) -> str | None:
         """
-        识别 / 开头的持久化命令。
+        识别 / 开头的持久化命令（命令表分发）。
         返回 None 表示不是命令；返回 'quit' 表示退出；返回 "" 表示已处理。
         """
         if not text.startswith("/"):
@@ -404,10 +362,33 @@ class AgentDemoApp:
         cmd = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else ""
 
-        if cmd in ("/quit", "/exit"):
-            return "quit"
-        elif cmd == "/help":
-            print("""
+        handlers = {
+            "/quit": self._cmd_quit,
+            "/exit": self._cmd_quit,
+            "/help": self._cmd_help,
+            "/sessions": self._cmd_sessions,
+            "/load": self._cmd_load,
+            "/new": self._cmd_new,
+            "/save": self._cmd_save,
+            "/rename": self._cmd_rename,
+            "/delete": self._cmd_delete,
+            "/clear": self._cmd_clear,
+            "/current": self._cmd_current,
+            "/db": self._cmd_db,
+        }
+        handler = handlers.get(cmd)
+        if handler is None:
+            print(f"  未知命令：{cmd}，输入 /help 查看所有命令")
+            return ""
+        return handler(arg)
+
+    # ---------- 会话命令处理器（签名：(self, arg: str) -> str） ----------
+
+    def _cmd_quit(self, arg: str) -> str:
+        return "quit"
+
+    def _cmd_help(self, arg: str) -> str:
+        print("""
 可用命令：
   /sessions        列出所有历史会话
   /load <编号>     加载指定会话（按 /sessions 的编号）
@@ -421,106 +402,112 @@ class AgentDemoApp:
   /help            显示此帮助
   /quit            退出程序
 """)
-            return ""
-        elif cmd == "/sessions":
-            sessions = self.store.list_sessions(limit=20)
-            if not sessions:
-                print("  暂无历史会话")
-            else:
-                print(f"\n📁 历史会话（共 {len(sessions)} 个）：")
-                for i, s in enumerate(sessions, 1):
-                    cur_tag = " ← 当前" if s.id == self.session_id else ""
-                    mode_tag = f"[{s.mode}]" if s.mode != "chat" else ""
-                    print(f"   {i}. {s.title} {mode_tag} ({self.store.count_messages(s.id)} 条){cur_tag}")
-            return ""
-        elif cmd == "/load":
-            sessions = self.store.list_sessions(limit=20)
-            if not sessions:
-                print("  暂无历史会话")
-                return ""
-            try:
-                idx = int(arg) - 1
-                if 0 <= idx < len(sessions):
-                    sid = sessions[idx].id
-                    saved = self.store.load_messages(sid)
-                    print(f"  ✅ 已加载「{sessions[idx].title}」（{len(saved)} 条消息）")
-                    self.history = [
-                        {"role": "system", "content": build_system_prompt(self.skill_registry)}
-                    ] + saved
-                    self.session_id = sid
-                    return ""
-            except ValueError:
-                pass
-            print("  用法: /load <编号>（编号来自 /sessions）")
-            return ""
-        elif cmd == "/new":
-            sid = self.store.create_session(title="新会话", mode="chat")
-            self.session_id = sid
-            self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}]
-            print(f"  ✨ 已创建新会话（ID: {sid}）")
-            return ""
-        elif cmd == "/save":
-            if not self.session_id:
-                print("  当前无活动会话")
-                return ""
-            title = arg or self.store.get_session(self.session_id).title
-            self.store.rename_session(self.session_id, title)
-            print(f"  💾 已保存为「{title}」")
-            return ""
-        elif cmd == "/rename":
-            if not self.session_id:
-                print("  当前无活动会话")
-                return ""
-            if not arg:
-                print("  用法: /rename <新标题>")
-                return ""
-            self.store.rename_session(self.session_id, arg)
-            print(f"  ✏️ 已重命名为「{arg}」")
-            return ""
-        elif cmd == "/delete":
-            sessions = self.store.list_sessions(limit=20)
-            try:
-                idx = int(arg) - 1
-                if 0 <= idx < len(sessions):
-                    sid = sessions[idx].id
-                    confirm = input(f"  确认删除「{sessions[idx].title}」？(y/N): ").strip().lower()
-                    if confirm == "y":
-                        self.store.delete_session(sid)
-                        if sid == self.session_id:
-                            self.session_id = None
-                            self.history = [
-                                {"role": "system", "content": build_system_prompt(self.skill_registry)}
-                            ]
-                        print("  🗑️ 已删除")
-                    else:
-                        print("  已取消")
-                    return ""
-            except ValueError:
-                pass
-            print("  用法: /delete <编号>")
-            return ""
-        elif cmd == "/clear":
-            if self.session_id:
-                self.store.clear_messages(self.session_id)
-                print("  🧹 已清空当前会话的消息历史（会话本身保留）")
-            else:
-                print("  当前无活动会话")
-            return ""
-        elif cmd == "/current":
-            if self.session_id:
-                s = self.store.get_session(self.session_id)
-                print(f"  当前会话: {s.title} [{s.mode}]")
-                print(f"  消息数: {self.store.count_messages(self.session_id)}")
-            else:
-                print("  当前无活动会话")
-            return ""
-        elif cmd == "/db":
-            print(f"  数据库路径: {self.store.db_path}")
-            print(f"  绝对路径:   {os.path.abspath(self.store.db_path)}")
-            return ""
+        return ""
+
+    def _cmd_sessions(self, arg: str) -> str:
+        sessions = self.store.list_sessions(limit=20)
+        if not sessions:
+            print("  暂无历史会话")
         else:
-            print(f"  未知命令：{cmd}，输入 /help 查看所有命令")
+            print(f"\n📁 历史会话（共 {len(sessions)} 个）：")
+            for i, s in enumerate(sessions, 1):
+                cur_tag = " ← 当前" if s.id == self.session_id else ""
+                mode_tag = f"[{s.mode}]" if s.mode != "chat" else ""
+                print(f"   {i}. {s.title} {mode_tag} ({self.store.count_messages(s.id)} 条){cur_tag}")
+        return ""
+
+    def _cmd_load(self, arg: str) -> str:
+        sessions = self.store.list_sessions(limit=20)
+        if not sessions:
+            print("  暂无历史会话")
             return ""
+        try:
+            idx = int(arg) - 1
+            if 0 <= idx < len(sessions):
+                sid = sessions[idx].id
+                saved = self.store.load_messages(sid)
+                print(f"  ✅ 已加载「{sessions[idx].title}」（{len(saved)} 条消息）")
+                self.history = [
+                    {"role": "system", "content": build_system_prompt(self.skill_registry)}
+                ] + saved
+                self.session_id = sid
+                return ""
+        except ValueError:
+            pass
+        print("  用法: /load <编号>（编号来自 /sessions）")
+        return ""
+
+    def _cmd_new(self, arg: str) -> str:
+        sid = self.store.create_session(title="新会话", mode="chat")
+        self.session_id = sid
+        self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}]
+        print(f"  ✨ 已创建新会话（ID: {sid}）")
+        return ""
+
+    def _cmd_save(self, arg: str) -> str:
+        if not self.session_id:
+            print("  当前无活动会话")
+            return ""
+        title = arg or self.store.get_session(self.session_id).title
+        self.store.rename_session(self.session_id, title)
+        print(f"  💾 已保存为「{title}」")
+        return ""
+
+    def _cmd_rename(self, arg: str) -> str:
+        if not self.session_id:
+            print("  当前无活动会话")
+            return ""
+        if not arg:
+            print("  用法: /rename <新标题>")
+            return ""
+        self.store.rename_session(self.session_id, arg)
+        print(f"  ✏️ 已重命名为「{arg}」")
+        return ""
+
+    def _cmd_delete(self, arg: str) -> str:
+        sessions = self.store.list_sessions(limit=20)
+        try:
+            idx = int(arg) - 1
+            if 0 <= idx < len(sessions):
+                sid = sessions[idx].id
+                confirm = input(f"  确认删除「{sessions[idx].title}」？(y/N): ").strip().lower()
+                if confirm == "y":
+                    self.store.delete_session(sid)
+                    if sid == self.session_id:
+                        self.session_id = None
+                        self.history = [
+                            {"role": "system", "content": build_system_prompt(self.skill_registry)}
+                        ]
+                    print("  🗑️ 已删除")
+                else:
+                    print("  已取消")
+                return ""
+        except ValueError:
+            pass
+        print("  用法: /delete <编号>")
+        return ""
+
+    def _cmd_clear(self, arg: str) -> str:
+        if self.session_id:
+            self.store.clear_messages(self.session_id)
+            print("  🧹 已清空当前会话的消息历史（会话本身保留）")
+        else:
+            print("  当前无活动会话")
+        return ""
+
+    def _cmd_current(self, arg: str) -> str:
+        if self.session_id:
+            s = self.store.get_session(self.session_id)
+            print(f"  当前会话: {s.title} [{s.mode}]")
+            print(f"  消息数: {self.store.count_messages(self.session_id)}")
+        else:
+            print("  当前无活动会话")
+        return ""
+
+    def _cmd_db(self, arg: str) -> str:
+        print(f"  数据库路径: {self.store.db_path}")
+        print(f"  绝对路径:   {os.path.abspath(self.store.db_path)}")
+        return ""
 
 
 def main(argv: list[str] | None = None) -> None:

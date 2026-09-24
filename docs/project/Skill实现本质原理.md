@@ -31,18 +31,18 @@
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  chat_with_tools() 的 Skill 路由层（client.py:151）                      │
+│  AgentRuntime.run() 的 Skill 路由层（runtime.py:47-67）                  │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │ 取最后一条用户消息 → skill_registry.match(user_input)            │   │
 │  │                                                                  │   │
-│  │ 命中？ ──Yes──→ chat_with_skill()（Skill 执行循环）                │   │
+│  │ 命中？ ──Yes──→ 注入 instructions + 过滤工具，走统一工具循环       │   │
 │  │  No            → 继续原有 Function Calling 流程（零 Skill 时完全不变） │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 └────────────────────────────┬────────────────────────────────────────────┘
                              │ 命中
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  chat_with_skill()（client.py:210）— Skill 的本质执行循环                 │
+│  AgentRuntime.run()（runtime.py:58-67）— Skill 在统一工具循环内执行       │
 │                                                                         │
 │  ① 替换 system prompt                                                   │
 │     messages[0].content = skill.instructions （Skill.md 的 Markdown 正文）│
@@ -215,23 +215,17 @@ def match(self, user_input: str) -> Optional[SkillDef]:
 
 ---
 
-### 4.2 chat_with_skill()：Skill 的执行循环
+### 4.2 AgentRuntime：Skill 的执行循环
 
-**位置**：`ai_agent/client.py:210-317`
+**位置**：`ai_agent/runtime.py:47-67`
 
-这是 Skill 的"引擎"，但它**没有发明新的执行机制**——它复用了 `chat_with_tools()` 的 Function Calling 循环，只做了三件事：
+Skill 的"引擎"现在收编在统一的工具循环 `AgentRuntime.run()` 里（CLI 和 Web 共用），命中 Skill 时只做三件事：
 
 #### ① 替换 system prompt
 
 ```python
-# 把 Skill 的 instructions（Markdown 正文）替换进 system prompt
-other_msgs = []
-for m in messages:
-    if m["role"] == "system" and not has_system:
-        other_msgs.append({"role": "system", "content": skill.instructions})
-        has_system = True
-    else:
-        other_msgs.append(m)
+# runtime.py: _apply_skill_prompt() 把 Skill 的 instructions 替换进 system prompt
+history = self._apply_skill_prompt(history, selected_skill.instructions)
 ```
 
 这是 Skill 最核心的设计决策：**Skill 的场景化指令就是它的 system prompt**。LLM 的行为直接由 system prompt 控制——换了 prompt 就等于换了"人格"和"工作流程"。
@@ -239,10 +233,11 @@ for m in messages:
 #### ② 过滤工具子集
 
 ```python
-required = set(skill.required_tools)
-if required:
-    filtered_map = {name: fn for name, fn in tool_map.items()
-                    if name in required}
+required = set(selected_skill.required_tools)
+active_map = {name: fn for name, fn in tool_map.items() if not required or name in required}
+active_tools = [
+    schema for schema in get_tool_schemas(mcp_manager) if schema["function"]["name"] in active_map
+]
 ```
 
 只让 LLM 看到 Skill 声明的工具。好处：
@@ -250,48 +245,50 @@ if required:
 - **防止乱选**：LLM 不会在 Skill 执行途中去调 `demo_stream_chat` 这种演示工具
 - **安全边界**：Skill 声明的工具就是它的权限范围
 
-#### ③ 复用 Function Calling 循环
+#### ③ 复用统一 Function Calling 循环
 
 ```python
-for _ in range(skill.max_rounds):
-    response = self.client.chat.completions.create(
-        model=self.model, messages=history,
-        tools=filtered_schemas,  # 用过滤后的
+max_iterations = selected_skill.max_rounds  # 命中 Skill 后，循环上限换成它的 max_rounds
+
+for iteration in range(1, max_iterations + 1):
+    response = self.client.client.chat.completions.create(
+        model=self.client.model, messages=history,
+        tools=active_tools,  # 用过滤后的
         temperature=temperature, max_tokens=max_tokens,
     )
-    choice = response.choices[0]
-    if choice.finish_reason == "stop":
-        return choice.message.content           # ← 和 chat_with_tools 完全一样
-    if choice.finish_reason == "tool_calls":
-        # 执行工具 → 喂回结果 → 下一轮
-        #  ← 这段代码就是 chat_with_tools 的第 170-184 行，几乎一字不差
+    ...
+    # finish_reason == "tool_calls" → 经 ToolExecutor 执行工具 → 喂回结果 → 下一轮
 ```
 
-**关键洞察：Function Calling 本身就是多轮循环**——LLM 选工具 → 我们执行 → 喂回结果 → LLM 再选 → ... → LLM 说"好的这是最终答案"（finish_reason == "stop"）。Skill 做的只是**给这个循环加上限（max_rounds）和过滤后的工具集**。
+**关键洞察：Function Calling 本身就是多轮循环**——LLM 选工具 → 我们执行 → 喂回结果 → LLM 再选 → ... → LLM 给出最终回答。Skill 做的只是**给这个循环加上限（max_rounds）和过滤后的工具集**。工具执行统一走 `ToolExecutor`（含写/执行/远端调用的风险策略），Skill 内外的工具调用共享同一套安全边界。
 
 ---
 
-### 4.3 chat_with_tools() 的 Skill 路由层
+### 4.3 AgentRuntime.run() 的 Skill 路由层
 
-**位置**：`ai_agent/client.py:151-164`
+**位置**：`ai_agent/runtime.py:47-67`
 
-在 `chat_with_tools()` 开头加了一个 10 行的前置判断：
+在统一工具循环 `AgentRuntime.run()` 开头有一段前置判断（`chat_with_tools()` 只是它的薄封装）：
 
 ```python
+selected_skill = None
 if skill_registry is not None:
     last_user = next(
-        (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
+        (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+        "",
     )
     if last_user:
-        matched = skill_registry.match(last_user)
-        if matched is not None:
-            return self.chat_with_skill(
-                messages, matched, tool_map,
-                mcp_manager=mcp_manager,  # Skill 也能用 MCP 远端工具
-            )
+        selected_skill = skill_registry.match(last_user)
+
+if selected_skill is not None:
+    history = self._apply_skill_prompt(history, selected_skill.instructions)
+    required = set(selected_skill.required_tools)
+    active_map = {name: fn for name, fn in tool_map.items() if not required or name in required}
+    active_tools = [...]               # 只保留 active_map 里的 schema（含 MCP 远端工具）
+    max_iterations = selected_skill.max_rounds
 ```
 
-**为什么不把路由逻辑做成独立函数？** 因为它必须在 `chat_with_tools` 开头——一旦进入 Function Calling 循环（`for _ in range(max_iterations):`），中间跳出去再回来很麻烦。前置判断最干净。
+**为什么不把路由逻辑做成独立函数？** 因为它必须在循环开始前——一旦进入 Function Calling 循环，中间跳出去再回来很麻烦。前置判断最干净：命中就就地换 prompt、换工具集、换轮次上限，然后走同一条循环。
 
 **向后兼容**：`skill_registry=None` 时整个 if 块跳过，一行都不执行。和改动前 100% 一致。
 
@@ -312,7 +309,7 @@ def build_system_prompt(skill_registry=None) -> str:
     return prompt
 ```
 
-**为什么只注入简述，不注入完整 instructions？** Skill 的完整 instructions 可能有几百字。如果一次性注入 5 个 Skill 的完整 prompt，system prompt 就膨胀了。**详细指令在 Skill 激活时才注入**（`chat_with_skill` 里替换 system prompt），平时只放简述让 LLM 知道"有什么能力可用"。
+**为什么只注入简述，不注入完整 instructions？** Skill 的完整 instructions 可能有几百字。如果一次性注入 5 个 Skill 的完整 prompt，system prompt 就膨胀了。**详细指令在 Skill 激活时才注入**（AgentRuntime 命中 Skill 时替换 system prompt），平时只放简述让 LLM 知道"有什么能力可用"。
 
 ---
 
@@ -330,15 +327,15 @@ Step 1 — 启动时
 
 Step 2 — 用户输入进 chat_with_tools()
   client.py: chat_with_tools(messages, tools, tool_map, skill_registry=...)
-    → 前置路由判断
+    → 委托给 AgentRuntime.run()，开头做前置路由判断
       → 取最后一条用户消息: "帮我规划并写一篇关于 AI Agent 的科普文章"
       → skill_registry.match()
           → "规划一下" 命中 trigger_keywords
           → score = 4/15 ≈ 0.27（实际看关键词表有多少命中...）
           → 返回 plan_and_write Skill ✅
 
-Step 3 — 进入 chat_with_skill()
-  client.py: chat_with_skill(messages, skill, tool_map)
+Step 3 — AgentRuntime 命中 Skill，就地切换执行上下文
+  runtime.py: AgentRuntime.run() 命中分支
     → ① 替换 system prompt
         messages[0].content = plan_and_write 的 Markdown 正文
                                 （"## 你是一个专业任务规划与执行者\n\n### 工作流\n..."）
@@ -416,7 +413,7 @@ Step 5 — 返回给用户
 ### 如果想扩展
 
 1. **加 LLM meta-routing**：在 `chat_with_tools` 的路由层，把候选 Skill 的描述发给 LLM，让它从"候选 Skill + 普通工具"里选。准确率更高，但多一次 API 调用
-2. **加 Skill 嵌套**：在 `chat_with_skill` 的循环里，检测到 LLM 想调另一个 Skill（比如名字以 `skill_` 开头的工具），递归激活
+2. **加 Skill 嵌套**：在 `AgentRuntime` 的循环里，检测到 LLM 想调另一个 Skill（比如名字以 `skill_` 开头的工具），递归激活
 3. **加 Skill trace**：在 Web UI 的 trace 里加 Skill 专属颜色标记（比如紫色），区分普通工具调用
 4. **加单元测试**：为 `SkillRegistry.match()` 写参数化测试，覆盖各种边界输入
 
@@ -454,4 +451,4 @@ Skill 的实现本质只有三句话：
 2. **换 Prompt + 过滤工具 = 换能力**：LLM 的行为由 system prompt 和可见工具集决定，换这两个就换了一个"Agent 人格"
 3. **Function Calling 本身就是多轮循环**：Skill 没有发明新执行机制，只是给现有循环加了"过滤后的工具集"和"上限"
 
-理解了这三点，再看 Skill 代码会发现它非常短——`skill.py` 290 行（含注释），`chat_with_skill` 100 行，路由层 10 行。**Skill 不是一个新框架，而是把三件已知的事情打包成了声明式单元**。
+理解了这三点，再看 Skill 代码会发现它非常短——`skill.py` 约 350 行（含注释），Skill 命中分支在 `runtime.py` 里只有约 20 行。**Skill 不是一个新框架，而是把三件已知的事情打包成了声明式单元**。

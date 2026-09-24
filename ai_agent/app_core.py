@@ -12,6 +12,7 @@ build_tool_map()，彻底消除两份实现逐渐漂移的问题。
 
 from __future__ import annotations
 
+import logging
 import os
 
 from ai_agent.multi_agent import run_multi_agent
@@ -29,6 +30,8 @@ from ai_agent.tools import (
     web_search,
 )
 from ai_agent.tools.wordpress import wp_publish as _wp_publish_impl
+
+log = logging.getLogger(__name__)
 
 # ============================================================
 # 系统提示词（自然语言 → 工具路由的"真相源"）
@@ -61,7 +64,8 @@ BASE_SYSTEM_PROMPT = (
     "- 用户要求【规划任务/拆解任务/分步骤完成复杂任务/写大纲并展开/规划并写一篇文章】时，调用 plan_task；\n"
     "- 用户要求【提取结构化信息/抽取字段/生成 JSON 数据/结构化输出】时，调用 extract_structured；\n"
     "- 执行敏感/破坏性操作前（删除覆盖文件、写入重要数据、SQL DDL/DML、终端写入命令），必须先调用 human_confirm 让用户确认；\n"
-    "- run_terminal 内部有关键词安全拦截（Remove-Item/Set-Content/Stop-Computer 等 PowerShell 原生命令会被阻断），若被拦截请改用 human_confirm 或普通文件操作工具；\n"
+    "- run_terminal 的安全闸门是「默认禁用 + 每次执行前人工确认」；其内部的关键词拦截只是辅助提示，"
+    "可被命令拼接、编码等手法绕过，不能当作防线——敏感命令一律先 human_confirm 让用户确认；\n"
     "- sql_query demo 模式只允许 SELECT/PRAGMA/EXPLAIN/WITH，DROP/DELETE/UPDATE 会被阻断；\n"
     "- calculator 使用 AST 白名单，不接受 eval/exec/__import__ 等任意代码；\n"
     "- 用户询问【天气】时，调用 get_weather；\n"
@@ -76,7 +80,7 @@ SYSTEM_PROMPT = BASE_SYSTEM_PROMPT
 def build_system_prompt(skill_registry=None) -> str:
     """
     运行时合成完整 system prompt：BASE_SYSTEM_PROMPT + 已加载 Skill 的简述列表。
-    Skill 的详细 instructions 只在 Skill 激活时才注入（chat_with_skill 内部处理），
+    Skill 的详细 instructions 只在 Skill 激活时才注入（AgentRuntime 激活时替换 system prompt），
     这里只列出名字和简述，节省 token。
     skill_registry: SkillRegistry 实例，None 或空则返回纯 BASE_SYSTEM_PROMPT。
     """
@@ -506,10 +510,28 @@ def build_tool_map(
     tool_map: dict = {}
     workspace_root = workspace_root or os.getcwd()
 
-    # ---------- 1. 模块级纯工具（tools.py）直接引用 ----------
-    tool_map["get_weather"] = get_weather
-    tool_map["calculator"] = calculator
-    tool_map["web_search"] = web_search
+    tool_map.update(_build_workspace_tools(workspace_root))
+    tool_map.update(_build_demo_tools(client, get_rag, test_image, workspace_root, tool_map))
+    tool_map.update(_build_wp_tools(workspace_root))
+
+    # summarize_history 需要读写 App 自身的 history，仅在提供访问器时注册
+    if get_history is not None:
+        tool_map["summarize_history"] = make_summarize_history(client, get_history, set_history)
+
+    # MCP 远端工具（可选，追加在本地工具之后）
+    if mcp_manager is not None:
+        tool_map.update(mcp_manager.make_callables())
+
+    return tool_map
+
+
+def _build_workspace_tools(workspace_root: str) -> dict:
+    """模块级纯工具 + 绑定 workspace_root 的文件/SQL 包装"""
+    tools: dict = {
+        "get_weather": get_weather,
+        "calculator": calculator,
+        "web_search": web_search,
+    }
 
     def workspace_file_read(path: str, max_chars: int = 3000) -> str:
         return file_read(path, max_chars=max_chars, workspace_root=workspace_root)
@@ -521,20 +543,23 @@ def build_tool_map(
     workspace_file_write.__name__ = "file_write"
     workspace_file_read.__doc__ = file_read.__doc__
     workspace_file_write.__doc__ = file_write.__doc__
-    tool_map["file_read"] = workspace_file_read
-    tool_map["file_write"] = workspace_file_write
+    tools["file_read"] = workspace_file_read
+    tools["file_write"] = workspace_file_write
 
     def workspace_sql_query(db_path: str, sql: str, demo_seed: bool = True) -> str:
         return sql_query(db_path, sql, demo_seed=demo_seed, workspace_root=workspace_root)
 
     workspace_sql_query.__name__ = "sql_query"
     workspace_sql_query.__doc__ = sql_query.__doc__
-    tool_map["sql_query"] = workspace_sql_query
-    tool_map["run_terminal"] = run_terminal
-    tool_map["human_confirm"] = human_confirm
-    tool_map["demo_code_run"] = run_code
+    tools["sql_query"] = workspace_sql_query
+    tools["run_terminal"] = run_terminal
+    tools["human_confirm"] = human_confirm
+    tools["demo_code_run"] = run_code
+    return tools
 
-    # ---------- 2. 闭包工具（绑定 client / get_rag / test_image）----------
+
+def _build_demo_tools(client, get_rag, test_image: str, workspace_root: str, tool_map: dict) -> dict:
+    """绑定 client / get_rag / test_image 的演示闭包工具。demo_react 在运行时读取最终 tool_map。"""
 
     def demo_stream_chat(topic: str) -> str:
         """流式对话演示：边生成边逐字输出"""
@@ -570,7 +595,7 @@ def build_tool_map(
         path = image_path.strip() or test_image
         if not path or not os.path.exists(path):
             return f"图片不存在：{path}。可改为不填路径使用测试图，或提供正确的图片路径。"
-        return client.analyze_image(path, question)
+        return client.analyze_image(path, question, workspace_root=workspace_root)
 
     def plan_task(task: str) -> str:
         return client.plan_and_execute(task)
@@ -602,18 +627,22 @@ def build_tool_map(
     def run_multi_agent_tool(task: str) -> str:
         return run_multi_agent(client, task)
 
-    tool_map["demo_stream_chat"] = demo_stream_chat
-    tool_map["demo_reasoning"] = demo_reasoning
-    tool_map["demo_native_reasoning"] = demo_native_reasoning
-    tool_map["demo_react"] = demo_react
-    tool_map["search_knowledge"] = search_knowledge
-    tool_map["reflexion_answer"] = reflexion_answer
-    tool_map["demo_vision"] = demo_vision
-    tool_map["plan_task"] = plan_task
-    tool_map["extract_structured"] = extract_structured
-    tool_map["demo_few_shot"] = demo_few_shot
-    tool_map["run_multi_agent"] = run_multi_agent_tool
+    return {
+        "demo_stream_chat": demo_stream_chat,
+        "demo_reasoning": demo_reasoning,
+        "demo_native_reasoning": demo_native_reasoning,
+        "demo_react": demo_react,
+        "search_knowledge": search_knowledge,
+        "reflexion_answer": reflexion_answer,
+        "demo_vision": demo_vision,
+        "plan_task": plan_task,
+        "extract_structured": extract_structured,
+        "demo_few_shot": demo_few_shot,
+        "run_multi_agent": run_multi_agent_tool,
+    }
 
+
+def _build_wp_tools(workspace_root: str) -> dict:
     def wp_publish_tool(
         md_file: str = "",
         title: str = "",
@@ -631,20 +660,10 @@ def build_tool_map(
             categories=categories,
             tags=tags,
             excerpt=excerpt,
+            cfg_workspace_root=workspace_root,
         )
 
-    tool_map["wp_publish"] = wp_publish_tool
-
-    # summarize_history 需要读写 App 自身的 history，仅在提供访问器时注册
-    if get_history is not None:
-        tool_map["summarize_history"] = make_summarize_history(client, get_history, set_history)
-
-    # ---------- 3. MCP 远端工具（可选，追加在本地工具之后）----------
-    if mcp_manager is not None:
-        mcp_callables = mcp_manager.make_callables()
-        tool_map.update(mcp_callables)
-
-    return tool_map
+    return {"wp_publish": wp_publish_tool}
 
 
 def build_tool_executor(
@@ -653,9 +672,11 @@ def build_tool_executor(
     allow_write: bool = True,
     allow_execute: bool = False,
     allow_mcp: bool = True,
+    allow_network: bool = True,
     confirm_write: bool = False,
     confirm_execute: bool = True,
     confirm_mcp: bool = True,
+    confirm_network: bool = False,
     mcp_allowlist: tuple[str, ...] = (),
     confirm=None,
 ) -> ToolExecutor:
@@ -665,9 +686,11 @@ def build_tool_executor(
         allow_write=allow_write,
         allow_execute=allow_execute,
         allow_mcp=allow_mcp,
+        allow_network=allow_network,
         confirm_write=confirm_write,
         confirm_execute=confirm_execute,
         confirm_mcp=confirm_mcp,
+        confirm_network=confirm_network,
         mcp_allowlist=requested_mcp or None,
     )
     return ToolExecutor(tool_map, policy=policy, confirm=confirm)
@@ -682,6 +705,8 @@ def filter_tool_schemas(tool_schemas: list[dict], policy: ToolPolicy) -> list[di
         if risk == "write" and not policy.allow_write:
             continue
         if risk == "execute" and not policy.allow_execute:
+            continue
+        if risk == "network" and not policy.allow_network:
             continue
         if risk == "mcp":
             if not policy.allow_mcp:
@@ -714,3 +739,43 @@ def make_summarize_history(client, get_history, set_history) -> callable:
         )
 
     return summarize_history
+
+
+def compress_and_persist_history(client, history: list[dict], store, session_id: str | None) -> list[dict]:
+    """摘要压缩 history，并把压缩结果重写进持久化存储（CLI / Web 共用）。返回压缩后的 history。"""
+    compressed = client.summarize_messages(history, keep_recent=4)
+    if session_id:
+        store.clear_messages(session_id)
+        # 重写当前 history（去掉 system）
+        for message in compressed[1:]:
+            store.append(
+                session_id,
+                message["role"],
+                message.get("content", ""),
+                message.get("tool_calls"),
+            )
+    return compressed
+
+
+def ensure_test_image(path: str) -> bool:
+    """生成图像识别演示用的测试图表（已存在则跳过）。返回 True 表示本次新建。"""
+    if os.path.exists(path):
+        log.debug("测试图片已存在，跳过生成: %s", path)
+        return False
+    try:
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (640, 400), "white")
+        draw = ImageDraw.Draw(img)
+        data = [("AI Agent", 120), ("RAG", 200), ("Agentic", 160), ("Multi-Agent", 90)]
+        x = 60
+        for label, h in data:
+            draw.rectangle([x, 400 - h, x + 120, 400], fill="steelblue")
+            draw.text((x + 20, 400 - h - 25), label, fill="black")
+            x += 140
+        draw.text((20, 20), "2026 AI Field Attention Survey", fill="black")
+        img.save(path)
+        return True
+    except (ImportError, OSError, ValueError) as exc:
+        log.warning("测试图片生成失败: %s", exc)
+        return False

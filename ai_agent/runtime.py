@@ -88,7 +88,7 @@ class AgentRuntime:
 
         for iteration in range(1, max_iterations + 1):
             try:
-                response = self.client.client.chat.completions.create(
+                response = self.client.create_chat_completion(
                     model=self.client.model,
                     messages=history,
                     tools=active_tools,

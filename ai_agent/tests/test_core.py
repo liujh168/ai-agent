@@ -4,23 +4,20 @@
 """
 
 import os
-import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from ai_agent.app_core import (  # noqa: E402
+from ai_agent.app_core import (
     SYSTEM_PROMPT,
     TOOL_COUNT,
     TOOL_SCHEMAS,
     build_tool_map,
     clean_react_tool_map,
 )
-from ai_agent.config import Config  # noqa: E402
-from ai_agent.eval import EVAL_CASES, EvalCase, Evaluator, ToolCallTracker  # noqa: E402
-from ai_agent.multi_agent import _parse_critic_decision, _parse_subtasks  # noqa: E402
-from ai_agent.rag import RAGKnowledgeBase  # noqa: E402
-from ai_agent.tools import run_code, run_terminal  # noqa: E402
+from ai_agent.config import Config
+from ai_agent.eval import EVAL_CASES, EvalCase, Evaluator, ToolCallTracker
+from ai_agent.multi_agent import _parse_critic_decision, _parse_subtasks
+from ai_agent.rag import RAGKnowledgeBase
+from ai_agent.tools import run_code, run_terminal
 
 # ============================================================
 # 共享模块 / 路由修复
@@ -37,11 +34,11 @@ class TestAppCore:
         assert "结构化" in SYSTEM_PROMPT
 
     def test_tool_count_consistent(self):
-        """TOOL_COUNT 应等于 TOOL_SCHEMAS 实际长度（单一真相源，避免 18/20/21/22 漂移）"""
-        assert TOOL_COUNT == len(TOOL_SCHEMAS) == 22
+        """TOOL_COUNT 与 TOOL_SCHEMAS 同源（单一真相源），不钉死具体数字"""
+        assert TOOL_COUNT == len(TOOL_SCHEMAS) > 0
 
     def test_tool_schemas_match_build_tool_map(self):
-        """TOOL_SCHEMAS 的每一个工具名都能在 build_tool_map 中找到实现"""
+        """TOOL_SCHEMAS 的每一个工具名都能在 build_tool_map 中找到实现、且在 SYSTEM_PROMPT 中有路由提示"""
 
         # 用一个假的 client / get_rag 构造工具映射
         class _DummyClient:
@@ -56,6 +53,8 @@ class TestAppCore:
         )
         schema_names = {s["function"]["name"] for s in TOOL_SCHEMAS}
         assert schema_names == set(tool_map.keys())
+        for name in schema_names:
+            assert name in SYSTEM_PROMPT, f"SYSTEM_PROMPT 未提示 {name}，模型不会路由到它"
 
     def test_search_knowledge_unavailable_safe(self):
         """RAG 不可用时返回友好提示而非抛异常"""
@@ -144,6 +143,46 @@ class TestEvalToolOutputChecks:
         result = evaluator._evaluate_one(case)
 
         assert result.passed, result.reason
+
+    def test_evaluator_syncs_history_box(self):
+        """评测路径的 summarize_history 通过 history_box 读到当前用例的会话历史"""
+
+        class _FakeClient:
+            def chat_with_tools(self, messages, tools, tool_map, **kwargs):
+                return "done"
+
+        history_box: list[dict] = []
+        evaluator = Evaluator(
+            client=_FakeClient(),
+            system_prompt="sys",
+            tools=[],
+            tool_map={},
+            history_box=history_box,
+        )
+        case = EvalCase(name="history_box_sync", capability="tool_routing", prompt="你好")
+
+        evaluator._evaluate_one(case)
+
+        assert history_box[0] == {"role": "system", "content": "sys"}
+        assert history_box[1] == {"role": "user", "content": "你好"}
+
+    def test_html_report_renders_template(self):
+        """HTML 报告应从模板文件渲染，占位符全部替换且内容转义"""
+        from ai_agent.eval import EvalResult
+
+        evaluator = Evaluator(client=None, system_prompt="", tools=[], tool_map={})
+        case = EvalCase(name="demo<case>", capability="tool_routing", prompt="p")
+        result = EvalResult(
+            case=case, passed=True, reason="通过全部检查", tools_called=[], output_preview="", elapsed=0.1
+        )
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "report.html")
+            evaluator._generate_html_report([result], out)
+            with open(out, encoding="utf-8") as f:
+                doc = f.read()
+        assert "demo&lt;case&gt;" in doc  # 已 HTML 转义
+        assert "100.0%" in doc
+        assert "$total" not in doc and "$case_rows" not in doc  # 占位符全部替换
 
 
 # ============================================================
@@ -294,6 +333,35 @@ class TestConfig:
         assert cfg.base_url == "http://example:1234/v1"
         assert cfg.model == "qwen3"
         assert cfg.chunk_size == 800
+
+    def test_invalid_numeric_env_gives_friendly_error(self, monkeypatch):
+        """RAG_CHUNK_SIZE=abc 这类配置错误应报带变量名和原始值的 ValueError"""
+        import pytest
+
+        monkeypatch.setenv("RAG_CHUNK_SIZE", "abc")
+        with pytest.raises(ValueError, match=r"RAG_CHUNK_SIZE.*'abc'"):
+            Config.from_env()
+
+    def test_history_max_chars_env_override(self, monkeypatch):
+        assert Config.from_env().history_max_chars == 5000
+        monkeypatch.setenv("HISTORY_MAX_CHARS", "8000")
+        assert Config.from_env().history_max_chars == 8000
+
+    def test_load_env_idempotent_and_no_override(self, monkeypatch):
+        """load_env 幂等且不覆盖已有环境变量（优先级：系统环境变量 > .env）"""
+        import ai_agent.config as config_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            env_file = os.path.join(td, "custom.env")
+            with open(env_file, "w", encoding="utf-8") as f:
+                f.write("EXISTING_VAR=from_file\nNEW_VAR_FROM_FILE=hello\n")
+            monkeypatch.setenv("EXISTING_VAR", "from_env")
+            monkeypatch.delenv("NEW_VAR_FROM_FILE", raising=False)
+            config_mod._loaded_env_files.discard(env_file)
+            assert config_mod.load_env(env_file) is True
+            assert os.environ["EXISTING_VAR"] == "from_env"  # 不覆盖已有值
+            assert os.environ["NEW_VAR_FROM_FILE"] == "hello"
+            assert config_mod.load_env(env_file) is True  # 幂等，不重复读盘
 
 
 if __name__ == "__main__":

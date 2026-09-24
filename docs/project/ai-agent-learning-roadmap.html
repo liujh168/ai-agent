@@ -289,8 +289,8 @@ const STAGES = [
       "读本项目 tools/ 目录，列出所有工具及其能力"
     ],
     code: [
-      ["ai_agent/app_core.py", "TOOL_SCHEMAS —— 21 种能力的工具定义（含 12 个内联编排闭包）"],
-      ["ai_agent/tools/__init__.py", "导出 9 个基础 schema：WEATHER_TOOL / CALCULATOR_TOOL / WEB_SEARCH_TOOL …"],
+      ["ai_agent/app_core.py", "TOOL_SCHEMAS —— 22 种能力的工具定义（schema 唯一真相源，含 12 个内联编排闭包）"],
+      ["ai_agent/tools/__init__.py", "统一 re-export 各子模块的工具函数（schema 见 app_core，不重复定义）"],
       ["ai_agent/tools/demo.py", "get_weather / calculator —— 最简单的两个工具实现样板"],
       ["ai_agent/tools/search.py", "web_search —— 博查优先、失败降级 DuckDuckGo 的健壮实现"],
       ["ai_agent/tools/sql.py", "sql_query —— 数据库查询工具"],

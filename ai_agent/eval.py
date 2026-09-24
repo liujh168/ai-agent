@@ -296,6 +296,7 @@ class Evaluator:
         tool_map: dict,
         max_iterations: int = 5,
         tool_executor=None,
+        history_box: list | None = None,
     ):
         self.client = client
         self.system_prompt = system_prompt
@@ -303,6 +304,7 @@ class Evaluator:
         self.tool_map = tool_map
         self.max_iterations = max_iterations
         self.tool_executor = tool_executor
+        self.history_box = history_box
 
     def run(
         self, cases: list[EvalCase] | None = None, tag: str | None = None, name_filter: str | None = None
@@ -351,6 +353,8 @@ class Evaluator:
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": case.prompt},
         ]
+        if self.history_box is not None:
+            self.history_box[:] = history
 
         t0 = time.time()
         try:
@@ -499,8 +503,9 @@ class Evaluator:
     # ---------- HTML 报告 ----------
 
     def _generate_html_report(self, results: list[EvalResult], path: str) -> None:
-        """生成 HTML 评测报告"""
+        """生成 HTML 评测报告（模板在 ai_agent/eval_report_template.html，string.Template 占位符）"""
         import html as _html
+        import string
 
         data = self.build_report_data(results)
         total = data["total"]
@@ -536,66 +541,18 @@ class Evaluator:
                 <td>{_html.escape(r.reason)}</td>
             </tr>"""
 
-        html_doc = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<title>🤖 AI Agent 评测报告</title>
-<style>
-  * {{ box-sizing: border-box; }}
-  body {{ font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; margin: 0; padding: 32px; color: #222; }}
-  h1 {{ margin: 0 0 8px; }}
-  .subtitle {{ color: #666; margin-bottom: 28px; }}
-  .cards {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }}
-  .card {{ background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
-  .card-label {{ color: #888; font-size: 13px; margin-bottom: 6px; }}
-  .card-value {{ font-size: 32px; font-weight: 700; }}
-  .card.total .card-value {{ color: #1976d2; }}
-  .card.passed .card-value {{ color: #4caf50; }}
-  .card.failed .card-value {{ color: #f44336; }}
-  .card.rate .card-value {{ color: #ff9800; }}
-  h2 {{ margin-top: 32px; margin-bottom: 16px; }}
-  .cap-row {{ display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }}
-  .cap-name {{ width: 120px; font-size: 14px; }}
-  .bar-bg {{ flex: 1; height: 18px; background: #e0e0e0; border-radius: 9px; overflow: hidden; }}
-  .bar-fill {{ height: 100%; border-radius: 9px; transition: width 0.3s; }}
-  .cap-num {{ width: 60px; text-align: right; font-family: monospace; }}
-  .cap-pct {{ width: 50px; text-align: right; color: #666; }}
-  table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
-  th, td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }}
-  th {{ background: #fafafa; color: #555; font-weight: 600; }}
-  tr.pass td {{ }}
-  tr.fail td {{ background: #fff5f5; }}
-  code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-size: 12px; }}
-  .summary-bar {{ height: 24px; background: #e0e0e0; border-radius: 12px; overflow: hidden; margin-bottom: 24px; }}
-  .summary-fill {{ height: 100%; background: linear-gradient(90deg, #4caf50, #66bb6a); border-radius: 12px; }}
-</style>
-</head>
-<body>
-<h1>🤖 AI Agent 评测报告</h1>
-<p class="subtitle">共 {total} 条用例 · 生成于 {time.strftime("%Y-%m-%d %H:%M:%S")}</p>
-
-<div class="summary-bar"><div class="summary-fill" style="width:{pass_rate_pct:.1f}%"></div></div>
-
-<div class="cards">
-  <div class="card total"><div class="card-label">总用例</div><div class="card-value">{total}</div></div>
-  <div class="card passed"><div class="card-label">通过</div><div class="card-value">{passed}</div></div>
-  <div class="card failed"><div class="card-label">失败</div><div class="card-value">{data["failed"]}</div></div>
-  <div class="card rate"><div class="card-label">通过率</div><div class="card-value">{pass_rate_pct:.1f}%</div></div>
-</div>
-
-<h2>🎯 能力维度</h2>
-{cap_bars}
-
-<h2>📋 用例详情</h2>
-<table>
-<thead><tr><th>用例</th><th>能力</th><th>工具调用</th><th>耗时</th><th>结果</th></tr></thead>
-<tbody>
-{case_rows}
-</tbody>
-</table>
-</body>
-</html>"""
+        template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_report_template.html")
+        with open(template_path, encoding="utf-8") as f:
+            template = string.Template(f.read())
+        html_doc = template.substitute(
+            total=total,
+            passed=passed,
+            failed=data["failed"],
+            pass_rate_pct=f"{pass_rate_pct:.1f}",
+            generated_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+            cap_bars=cap_bars,
+            case_rows=case_rows,
+        )
 
         with open(path, "w", encoding="utf-8") as f:
             f.write(html_doc)
@@ -649,22 +606,18 @@ def main() -> None:
         return
 
     # ---- 自包含初始化（不依赖 main.py，CLI 与 Web UI 共用同一套模块） ----
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-    except ImportError:
-        pass
-
     from ai_agent.app_core import (
         SYSTEM_PROMPT,
         TOOL_SCHEMAS,
         build_tool_executor,
         build_tool_map,
+        ensure_test_image,
     )
     from ai_agent.client import LMStudioClient
-    from ai_agent.config import Config
+    from ai_agent.config import Config, load_env
     from ai_agent.rag import RAGKnowledgeBase
+
+    load_env()
 
     cfg = Config.from_env()
     client = LMStudioClient(
@@ -720,33 +673,16 @@ def main() -> None:
             print("ℹ️ 已跳过 RAG 知识库构建（--no-rag）")
 
         test_image = os.path.join(workspace, "_test_chart.png")
-        if not os.path.exists(test_image):
-            try:
-                from PIL import Image, ImageDraw
+        ensure_test_image(test_image)
 
-                img = Image.new("RGB", (640, 400), "white")
-                draw = ImageDraw.Draw(img)
-                for i, (label, h) in enumerate(
-                    [
-                        ("AI Agent", 120),
-                        ("RAG", 200),
-                        ("Agentic", 160),
-                        ("Multi-Agent", 90),
-                    ]
-                ):
-                    x = 60 + i * 140
-                    draw.rectangle([x, 400 - h, x + 120, 400], fill="steelblue")
-                    draw.text((x + 20, 400 - h - 25), label, fill="black")
-                draw.text((20, 20), "2026 AI Field Attention Survey", fill="black")
-                img.save(test_image)
-            except Exception:
-                pass
-
+        eval_history: list[dict] = []
         tool_map = build_tool_map(
             client,
             lambda: rag,
             test_image,
             workspace_root=workspace,
+            get_history=lambda: eval_history,
+            set_history=lambda new: eval_history.__setitem__(slice(None), new),
         )
         tool_executor = build_tool_executor(
             tool_map,
@@ -765,6 +701,7 @@ def main() -> None:
             tool_map=tool_map,
             max_iterations=5,
             tool_executor=tool_executor,
+            history_box=eval_history,
         )
         cases = EVAL_CASES
         if not args.enable_dangerous_tools:

@@ -6,11 +6,7 @@
 """
 
 import os
-import sys
 import tempfile
-
-# 确保能 import scripts 包（测试文件在 scripts/tests/ 下，需要项目根进 path）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pytest
 
@@ -94,6 +90,53 @@ class TestFileIO:
             outside = os.path.join(tempfile.gettempdir(), "outside-test.txt")
             result = file_write(outside, "blocked", workspace_root=td)
             assert "安全限制" in result
+
+
+# ============================================================
+# analyze_image / wp_publish — 外发工具的路径穿越防护
+# ============================================================
+
+
+class TestExternalToolPathSafety:
+    def test_analyze_image_blocks_path_traversal(self):
+        client = object.__new__(LMStudioClient)  # 绕过 __init__，不触发任何网络
+        result = client.analyze_image("../../../etc/passwd")
+        assert "安全限制" in result
+
+    def test_analyze_image_passes_workspace_path(self, monkeypatch):
+        """工作区内的路径应通过校验（之后失败在文件读取，而不是安全检查）"""
+        client = object.__new__(LMStudioClient)
+        monkeypatch.setattr(client, "ensure_model_loaded", lambda: "model")
+        with pytest.raises(FileNotFoundError):
+            client.analyze_image("no_such_image.png")
+
+    def test_wp_publish_blocks_md_file_outside_workspace(self):
+        from ai_agent.tools.wordpress import wp_publish
+
+        with tempfile.TemporaryDirectory() as td:
+            result = wp_publish(
+                md_file="../../../etc/passwd",
+                cfg_wp_url="http://wp.example.com",
+                cfg_wp_user="demo",
+                cfg_wp_app_password="demo xxxx xxxx",
+                cfg_workspace_root=td,
+            )
+            assert "安全限制" in result
+
+    def test_wp_publish_passes_md_file_inside_workspace(self):
+        """工作区内的 md_file 应通过路径校验（之后报文件不存在，而不是安全限制）"""
+        from ai_agent.tools.wordpress import wp_publish
+
+        with tempfile.TemporaryDirectory() as td:
+            result = wp_publish(
+                md_file="post.md",
+                cfg_wp_url="http://wp.example.com",
+                cfg_wp_user="demo",
+                cfg_wp_app_password="demo xxxx xxxx",
+                cfg_workspace_root=td,
+            )
+            assert "安全限制" not in result
+            assert "文件不存在" in result
 
 
 # ============================================================

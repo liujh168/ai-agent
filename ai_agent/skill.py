@@ -22,7 +22,7 @@ Skill 是 Tool 的上层抽象：声明式 Markdown 文件 = 场景化 System Pr
 核心数据流:
     启动 → SkillRegistry 扫描 skills/*.md → 解析元数据 + 正文
     用户输入 → registry.match(text) → 返回 SkillDef | None
-    命中 → client.chat_with_skill(messages, skill, tool_map) → 多轮执行
+    命中 → AgentRuntime 注入 instructions、按 required_tools 过滤工具 → 多轮执行
     未命中 → 走原有 chat_with_tools（行为完全不变）
 """
 
@@ -33,6 +33,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from typing import Any
 
 log = logging.getLogger("Agent")
 
@@ -64,7 +65,7 @@ class SkillDef:
 _FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 
 
-def _parse_value(raw: str) -> any:
+def _parse_value(raw: str) -> Any:
     """把 YAML-ish 的值转成 Python 对象。支持字符串、整数、布尔、内联列表 [a, b, c]"""
     raw = raw.strip()
     # 内联列表 [a, b, c]

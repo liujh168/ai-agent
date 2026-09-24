@@ -21,12 +21,15 @@
 """
 
 import json
+import logging
 import os
 import sqlite3
 import threading
 import time
 import uuid
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ai_agent_history.db")
 
@@ -225,8 +228,8 @@ class ChatStore:
         with self._lock:
             try:
                 self.conn.close()
-            except Exception:
-                pass
+            except sqlite3.Error as exc:
+                log.debug("关闭数据库连接时出错（忽略）: %s", exc)
 
     def __enter__(self):
         return self

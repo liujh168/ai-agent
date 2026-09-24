@@ -1,9 +1,12 @@
 """SQL 查询工具：基于 sqlite3 的演示 Agent"""
 
+import logging
 import sqlite3
 from pathlib import Path
 
 from .fs import resolve_workspace_path
+
+log = logging.getLogger(__name__)
 
 
 def _seed_demo_database(db_path: Path) -> None:
@@ -59,9 +62,8 @@ def sql_query(
     之后传入任意 SQL 查询语句，返回格式化结果。
     """
     abs_path, error = resolve_workspace_path(db_path, workspace_root)
-    if error:
-        return error
-    assert abs_path is not None
+    if error or abs_path is None:
+        return error or "安全限制：路径解析失败"
     abs_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -106,5 +108,6 @@ def sql_query(
             )
         finally:
             conn.close()
-    except Exception as e:
+    except (sqlite3.Error, OSError, ValueError) as e:
+        log.warning("SQL 执行失败（%s）: %s", abs_path, e)
         return f"SQL 执行失败 ({type(e).__name__}): {e}\n数据库路径: {abs_path}"

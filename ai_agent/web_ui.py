@@ -24,21 +24,17 @@ from ai_agent.app_core import (
     build_tool_executor,
     build_tool_map,
     clean_react_tool_map,
+    compress_and_persist_history,
     filter_tool_schemas,
     get_tool_schemas,
 )
 from ai_agent.client import LMStudioClient
-from ai_agent.config import Config
+from ai_agent.config import Config, load_env
 from ai_agent.multi_agent import run_multi_agent
 from ai_agent.persistence import DEFAULT_DB_PATH, ChatStore
-from ai_agent.rag import RAGKnowledgeBase
+from ai_agent.rag import RAGKnowledgeBase, collect_rag_files
 
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except ImportError:
-    pass
+load_env()
 
 
 SessionState = dict[str, Any]
@@ -110,6 +106,7 @@ class AgentApp:
             allow_write=allow_write,
             allow_execute=False,
             allow_mcp=allow_mcp,
+            allow_network=not self.disable_dangerous,
             confirm_write=False,
             confirm_execute=False,
             confirm_mcp=False,
@@ -126,16 +123,10 @@ class AgentApp:
         skill_dir = self.cfg.skill_dir
         if not skill_dir:
             return
-        abs_dir = os.path.join(self.project_root, skill_dir)
-        if not os.path.isdir(abs_dir):
-            return
-        try:
-            from ai_agent.skill import SkillRegistry
+        from ai_agent.skill import create_skill_registry
 
-            self.skill_registry = SkillRegistry(abs_dir, list(self.tool_map.keys()))
-        except Exception as exc:
-            print(f"  ⚠️ SkillRegistry 初始化失败: {exc}")
-            self.skill_registry = None
+        abs_dir = os.path.join(self.project_root, skill_dir)
+        self.skill_registry = create_skill_registry(abs_dir, list(self.tool_map.keys()))
 
     def _init_mcp(self):
         try:
@@ -171,17 +162,7 @@ class AgentApp:
                     request_timeout=self.cfg.request_timeout,
                 )
                 # 扫描 cfg.rag_directories 下的全部 .md / .txt / .pdf 文件
-                rag_paths: list[str] = []
-                for rel_dir in self.cfg.rag_directories:
-                    abs_dir = os.path.join(self.project_root, rel_dir)
-                    if not os.path.isdir(abs_dir):
-                        continue
-                    for root, _, files in os.walk(abs_dir):
-                        for fname in files:
-                            fpath = os.path.join(root, fname)
-                            ext = os.path.splitext(fname)[1].lower()
-                            if ext in (".md", ".txt", ".pdf"):
-                                rag_paths.append(fpath)
+                rag_paths = collect_rag_files(self.project_root, self.cfg.rag_directories)
                 if rag_paths:
                     self.rag.build(rag_paths)
                     print(f"RAG 已加载 {len(rag_paths)} 个文件，共 {len(self.rag.chunks)} 个 chunks")
@@ -297,20 +278,11 @@ class AgentApp:
 
     def _maybe_compress(self, state: SessionState) -> None:
         total_chars = sum(len(m.get("content") or "") for m in state["history"])
-        if total_chars <= 5000:
+        if total_chars <= self.cfg.history_max_chars:
             return
-        compressed = self.client.summarize_messages(state["history"], keep_recent=4)
-        state["history"] = compressed
-        session_id = state.get("session_id")
-        if session_id:
-            self.store.clear_messages(session_id)
-            for message in compressed[1:]:
-                self.store.append(
-                    session_id,
-                    message["role"],
-                    message.get("content", ""),
-                    message.get("tool_calls"),
-                )
+        state["history"] = compress_and_persist_history(
+            self.client, state["history"], self.store, state.get("session_id")
+        )
 
     def send(self, user_text: str, history: list[dict], state: SessionState | None):
         state = self.ensure_state(state)
@@ -511,7 +483,7 @@ def build_ui(app: AgentApp) -> gr.Blocks:
                     "- 文件操作限制在项目工作区\n"
                     "- SQL 始终以只读连接执行\n"
                     "- Web 不开放代码和终端执行\n"
-                    "- 公网分享模式关闭文件写入和 MCP"
+                    "- 公网分享模式关闭文件写入、MCP 和外发网络工具"
                 )
 
             with gr.Column(scale=3):
@@ -629,12 +601,16 @@ def main() -> None:
     print()
 
     demo = build_ui(app)
-    demo.launch(
-        server_name=args.host,
-        server_port=args.port,
-        share=args.share,
-        inbrowser=False,
-    )
+    try:
+        demo.launch(
+            server_name=args.host,
+            server_port=args.port,
+            share=args.share,
+            inbrowser=False,
+        )
+    finally:
+        if app.mcp_manager is not None:
+            app.mcp_manager.close_all()
 
 
 if __name__ == "__main__":

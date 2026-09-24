@@ -7,11 +7,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-RiskKind = Literal["read", "write", "execute", "mcp"]
+RiskKind = Literal["read", "write", "execute", "mcp", "network"]
 ConfirmationCallback = Callable[[str, RiskKind, dict], bool]
 
 EXECUTE_TOOLS = frozenset({"run_code", "run_terminal", "demo_code_run"})
 WRITE_TOOLS = frozenset({"file_write"})
+NETWORK_TOOLS = frozenset({"wp_publish", "web_search", "demo_vision"})
 
 
 @dataclass(frozen=True)
@@ -21,9 +22,11 @@ class ToolPolicy:
     allow_write: bool = True
     allow_execute: bool = False
     allow_mcp: bool = True
+    allow_network: bool = True
     confirm_write: bool = False
     confirm_execute: bool = True
     confirm_mcp: bool = True
+    confirm_network: bool = False
     mcp_allowlist: frozenset[str] | None = None
 
     def classify(self, name: str) -> RiskKind:
@@ -31,6 +34,8 @@ class ToolPolicy:
             return "execute"
         if name in WRITE_TOOLS:
             return "write"
+        if name in NETWORK_TOOLS:
+            return "network"
         if name.startswith("mcp_"):
             return "mcp"
         return "read"
@@ -92,6 +97,8 @@ class ToolExecutor:
             return f"安全限制：当前模式禁止写入工具 {name}"
         if risk == "execute" and not self.policy.allow_execute:
             return f"安全限制：当前模式禁止执行工具 {name}"
+        if risk == "network" and not self.policy.allow_network:
+            return f"安全限制：当前模式禁止外发网络工具 {name}"
         if risk == "mcp":
             if not self.policy.allow_mcp:
                 return f"安全限制：当前模式禁止 MCP 工具 {name}"
@@ -107,4 +114,6 @@ class ToolExecutor:
             return self.policy.confirm_execute
         if risk == "mcp":
             return self.policy.confirm_mcp
+        if risk == "network":
+            return self.policy.confirm_network
         return False

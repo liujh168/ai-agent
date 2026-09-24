@@ -63,10 +63,11 @@ class RAGKnowledgeBase:
         if ext == ".pdf":
             reader = PdfReader(path)
             parts = []
-            for page in reader.pages:
+            for page_no, page in enumerate(reader.pages, 1):
                 try:
                     parts.append(page.extract_text() or "")
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError, OSError) as exc:
+                    log.warning("PDF %s 第 %d 页文本抽取失败，已跳过: %s", path, page_no, exc)
                     continue
             return "\n".join(parts)
         if ext in (".md", ".txt"):
@@ -243,3 +244,17 @@ class RAGKnowledgeBase:
         with temp_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
         os.replace(temp_path, cache_path)
+
+
+def collect_rag_files(project_root: str, directories) -> list[str]:
+    """递归扫描 project_root 下指定目录里的知识文件（.md / .txt / .pdf），不存在的目录跳过。"""
+    paths: list[str] = []
+    for rel_dir in directories:
+        abs_dir = os.path.join(project_root, rel_dir)
+        if not os.path.isdir(abs_dir):
+            continue
+        for root, _, files in os.walk(abs_dir):
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() in RAGKnowledgeBase.SUPPORTED_EXT:
+                    paths.append(os.path.join(root, fname))
+    return paths

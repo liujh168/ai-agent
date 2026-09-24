@@ -11,11 +11,33 @@
   - `docs/blog/`：开发博客（WordPress 系列 5 篇：Function Calling 极简实现 → 单一真相源 → Skill 做成 Markdown → 安全三层防御 → Gold Case 评测框架）
 - **设计决策清单** `docs/project/设计决策清单.md`：34 条设计决策（架构/安全/RAG/Skill/协议/体验/评测 7 类），每条含代码片段 + 权衡分析 + 演进方向
 - **Config.rag_directories** `ai_agent/config.py`：新增 RAG 知识扫描目录配置项，默认 `("docs/knowledge",)`，支持 `RAG_DIRECTORIES` 环境变量分号分隔
+- **WordPress 博客发布工具 `wp_publish`**（1478acf / ad15239 / 73fc31d）：薄包装 `skills/wordpress-publish/wp_auto_publisher.py`，支持 md_file 自动解析 Front Matter 与 title+content_html 直传两种模式；凭证经 Config 注入（wp_user 缺省时从应用密码解析）；自动加载 skill 目录 `.env` 且不覆盖已有环境变量；修复非 posts 目录下 md 文件解析失败
+- **network 风险级** `ai_agent/tooling.py`：ToolPolicy 风险分类从四级扩为五级（read/write/execute/mcp/network），wp_publish / web_search / demo_vision 等外发工具归入 network；CLI 默认执行前人工确认，Web 公网分享模式整体禁用，eval 默认放行
+- **CI 工作流** `.github/workflows/ci.yml`：push/PR 触发，matrix Python 3.10–3.13（Windows runner，锁文件含 pywin32），步骤为 pip 安装 → ruff → pytest
+- **离线测试扩充至 101 条**：新增 Skill 解析/匹配、demos（ReAct 解析、structured_extract 重试）、wp_publish 全 mock 流程、MCP `_send` 错误分支与连接失败占位、eval HTML 报告模板渲染、路径穿越防护等测试文件
 
 ### Changed（变更）
 - **RAG 初始化改为目录扫描** `main.py` / `ai_agent/web_ui.py` / `ai_agent/eval.py`：从硬编码单文件路径改为遍历 `cfg.rag_directories` 下全部 `.md/.txt/.pdf` 文件，新增知识源放入 `docs/knowledge/` 即自动纳入索引
 - **根目录 README.md 更新**：补全新增模块（config.py / skill.py / mcp_client.py）、配置表格补 rag_directories、项目结构树更新为 docs 三层结构
 - **修复文件名尾部空格**：`docs/大语言模型能力说明 .md` → `docs/knowledge/大语言模型能力说明.md`
+- **client.py 拆分**：演示级 Agent 算法（ReAct / 思维链 / 原生推理 / 反思 / 规划 / 结构化提取）迁至 `ai_agent/demos/` 包，`LMStudioClient` 保留同名薄委托方法，对外 API 不变
+- **build_tool_map 工厂化** `ai_agent/app_core.py`：158 行嵌套闭包拆为 `_build_workspace_tools` / `_build_demo_tools` / `_build_wp_tools` 三个小工厂，build_tool_map 只做组装，行为逐行等价
+- **评测 HTML 模板外置** `ai_agent/eval_report_template.html`：`_generate_html_report` 的内嵌模板字符串改为 string.Template 占位符文件，pyproject 增加 package-data 打包配置
+- **CLI 会话命令表分发** `main.py`：`_try_session_command` 的 128 行 if/elif 改为命令表 + 每命令独立 handler 方法
+- **配置收口** `ai_agent/config.py`：新增幂等 `load_env()`，main.py / web_ui.py / eval.py / wordpress.py 四处 .env 加载统一调用；`Config.history_max_chars`（env `HISTORY_MAX_CHARS`）收口 CLI/Web 两处压缩阈值；数值型环境变量转换失败时给出带变量名与原始值的友好报错；`LMStudioClient` 不再直读 `os.environ`，统一走构造参数
+- **依赖补齐与锁文件重生**：markdown / python-frontmatter / schedule 进入 `[project] dependencies`（修复全新安装后 wp_publish 必 ImportError）；`requirements.lock` / `requirements-dev.lock` 改用 pip-compile 重新生成（去除本机绝对路径与私有服务器地址）；requires-python 放宽至 `>=3.10,<3.14`
+- **重复代码消除**：RAG 目录扫描抽为 `rag.collect_rag_files()`；测试图生成抽为 `app_core.ensure_test_image()`；压缩+持久化抽为 `app_core.compress_and_persist_history()`；Skill 注册统一走 `skill.create_skill_registry()`；删除 `tools/__init__.py` 中与 TOOL_SCHEMAS 重复的 9 个过期 schema 常量
+
+### Fixed（修复）
+- **外发工具路径校验**：`analyze_image` 与 `wp_publish` 的 md_file 模式均限制在工作区内（复用 `resolve_workspace_path`），阻断 LLM 传任意路径读本地文件
+- **评测路径工具注册对齐**：eval.py 构建 tool_map 时传入 history 访问器，`summarize_history` 不再出现"schema 存在但工具缺失"
+- **删除死代码 `chat_with_skill`** `ai_agent/client.py`：无调用方（Skill 路由实际在 `runtime.py` 的 AgentRuntime 内），同步修正三处文档/注释的过期描述
+- **`MCPError` 改为 Exception 子类** `ai_agent/mcp_client.py`：修复普通 dataclass 被 raise 时实际抛 TypeError 的潜伏 bug；新增 `MCPManager.close_all()` 并在 Web 入口退出路径调用；`_server_index` / `_tools` 私有属性收口为公开成员
+- **异常收窄与日志**：persistence.close / rag PDF 抽页 / mcp ping / sql 查询 / RAG 初始化 / 测试图生成等 6 处裸 `except Exception` 收窄类型并补日志
+- **assert 控制流修正**：fs.py / sql.py / wordpress.py 的 `assert ... is not None` 改显式错误返回（`python -O` 下 assert 失效）
+- **AgentRuntime 私有穿透收口**：`client.client.chat.completions` 两层私有访问改为 `LMStudioClient.create_chat_completion()` 公开委托
+- **SYSTEM_PROMPT 措辞修正**：run_terminal 的关键词拦截降级为"辅助提示"，明确真正的闸门是默认禁用 + 执行前人工确认
+- **仓库卫生**：example.db / greet.txt / eval_report_run.html / .workbuddy 移出版本控制，.gitignore 补 `*.db` / `eval_report*.html` / `.workbuddy/`；.env.example 与 config.py 注释中的个人域名改为 example.com
 
 ---
 

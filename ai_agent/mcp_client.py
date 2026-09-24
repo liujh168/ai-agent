@@ -25,6 +25,7 @@ ai_agent.mcp_client — 极简 MCP HTTP/Streamable HTTP 客户端
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from collections.abc import Callable
@@ -32,6 +33,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import requests
+
+log = logging.getLogger(__name__)
 
 # ============================================================
 # 数据结构
@@ -50,7 +53,7 @@ class MCPTool:
 
 
 @dataclass
-class MCPError:
+class MCPError(Exception):
     """MCP 协议级错误"""
 
     code: int
@@ -93,6 +96,12 @@ class MCPClient:
         self._connected: bool = False
         self._server_info: dict = {}
         self._tools: list[MCPTool] = []
+        self.server_index: int = -1  # 由 MCPManager.connect_all 分配
+
+    @property
+    def tools(self) -> list[MCPTool]:
+        """最近一次 list_tools() 拉到的工具列表"""
+        return list(self._tools)
 
     # ---------- 底层 JSON-RPC ----------
 
@@ -280,7 +289,8 @@ class MCPClient:
         try:
             self._send("ping", {})
             return True
-        except Exception:
+        except (MCPError, requests.RequestException) as exc:
+            log.debug("MCP ping 失败（%s）: %s", self.url, exc)
             return False
 
     @property
@@ -326,7 +336,7 @@ class MCPManager:
                 client = MCPClient(url)
                 client.initialize()
                 tools = client.list_tools()
-                client._server_index = idx
+                client.server_index = idx
 
                 for t in tools:
                     safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", t.name)
@@ -354,7 +364,7 @@ class MCPManager:
         for idx, client in enumerate(self._clients):
             if client is None:
                 continue
-            for tool in client._tools:
+            for tool in client.tools:
                 schemas.append(
                     {
                         "type": "function",
@@ -411,6 +421,12 @@ class MCPManager:
     def is_mcp_tool(self, name: str) -> bool:
         """判断一个工具名是否来自 MCP（Web UI trace 区分用）"""
         return name in self._tool_names
+
+    def close_all(self) -> None:
+        """关闭所有已连接的 MCP 会话（best-effort，入口退出时调用）"""
+        for client in self._clients:
+            if client is not None:
+                client.close()
 
 
 # ============================================================

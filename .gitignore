@@ -38,3 +38,10 @@ poem.txt
 .vscode/
 .idea/
 .trae/
+
+# 评测产物 & 本地状态
+*.db
+eval_report*.html
+.workbuddy/
+!ai_agent/eval_report_template.html
+greet.txt

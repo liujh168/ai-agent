@@ -28,9 +28,8 @@ def file_read(
     超长文件截断并返回前后各一半（保留上下文）。
     """
     safe_path, error = resolve_workspace_path(path, workspace_root)
-    if error:
-        return error
-    assert safe_path is not None
+    if error or safe_path is None:
+        return error or "安全限制：路径解析失败"
     if not safe_path.exists():
         return f"文件不存在: {safe_path}"
     if safe_path.is_dir():
@@ -74,9 +73,8 @@ def file_write(
     mode='append' 追加写入。返回写入结果。
     """
     safe_path, error = resolve_workspace_path(path, workspace_root)
-    if error:
-        return error
-    assert safe_path is not None
+    if error or safe_path is None:
+        return error or "安全限制：路径解析失败"
 
     op = "追加" if mode == "append" else "覆盖"
     try:
