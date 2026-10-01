@@ -36,7 +36,9 @@ AgentRuntime.run()
 - `ai_agent/app_core.py`：提示词、工具 schema、工具注册（单一真相源）
 - `ai_agent/persistence.py`：线程安全的 SQLite 会话存储
 - `ai_agent/web_ui.py`：按浏览器隔离状态的 Gradio UI
-- `ai_agent/client.py`：LM Studio 客户端 + 高级 Agent 模式
+- `ai_agent/client.py`：LM Studio 客户端 + 高级 Agent 模式（所有 API 调用经 `_create_completion` 收口）
+- `ai_agent/llm_trace.py`：LLM 调用快照（输入消息/工具/参数、输出、用量、耗时，供双界面展示）
+- `ai_agent/cli_trace.py`：CLI 侧的调用摘要与 `/calls` 详情渲染（rich）
 - `ai_agent/rag.py`：RAG 检索与安全缓存
 - `ai_agent/skill.py`：Skill 加载与关键词路由匹配
 - `ai_agent/mcp_client.py`：MCP Streamable HTTP 客户端
@@ -113,6 +115,21 @@ python -m ai_agent
 | `--share` | 生成公网分享链接 | `false` |
 
 > 完整配置参考见 [docs/project/Config-配置参考.md](docs/project/Config-配置参考.md)。
+
+## 观察 LLM API 的输入输出
+
+所有模式（Function Calling / ReAct / 多 Agent 等）的请求都经过 `LMStudioClient._create_completion`
+这一个收口点，每次调用的输入与输出会被快照记录下来，两个界面都能查看：
+
+- **Web UI**：右栏「API 调用检查器」按「第几轮提问」分组列出本会话的所有调用——历史轮折叠、
+  最新一轮展开；chat 模式流式生成时输出实时增长；卡片内输入（消息 + 工具 schema + 采样参数）
+  与输出（content / tool_calls / finish_reason / token 用量）左右对照，附请求 JSON、响应 JSON
+  与可复制运行的等价 Python 代码，鼠标悬停代码块可一键复制。「🗑 清空调用记录」可随时重置。
+- **CLI**：每轮回复后自动打印一行调用摘要（次数 / token / 耗时），输入 `/calls` 查看上一轮
+  每次调用的完整输入输出面板，`/calls json` 额外打印请求/响应 JSON 与等价代码，
+  `/calls off` 可关闭摘要行。
+
+> 流式响应服务端不返回 usage，此时 token 数为字符估算值，界面以「≈」标注。
 
 ## 安全默认值
 

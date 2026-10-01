@@ -11,6 +11,7 @@ def run_reflexion(
     def _ask() -> str:
         return (
             client.create_chat_completion(
+                label="反思迭代",
                 model=client.model,
                 messages=history,
                 temperature=temperature,

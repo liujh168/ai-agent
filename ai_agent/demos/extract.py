@@ -18,6 +18,7 @@ def run_structured_extract(
     def _generate(extra_hint: str = "") -> str:
         return (
             client.create_chat_completion(
+                label="结构化提取" + ("（重试）" if extra_hint else ""),
                 model=client.model,
                 messages=[{"role": "user", "content": prompt + extra_hint}],
                 temperature=temperature,

@@ -29,6 +29,7 @@ class AgentRuntime:
         max_tokens: int = 2048,
         skill_registry=None,
         mcp_manager=None,
+        stream: bool = False,
     ) -> Iterator[AgentEvent]:
         self.client.ensure_model_loaded()
         history = list(messages)
@@ -88,13 +89,26 @@ class AgentRuntime:
 
         for iteration in range(1, max_iterations + 1):
             try:
-                response = self.client.create_chat_completion(
-                    model=self.client.model,
-                    messages=history,
-                    tools=active_tools,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                label = f"Agent 循环 · 第 {iteration}/{max_iterations} 轮"
+                if stream:
+                    # 流式：快照边生成边更新（UI 实时可见），聚合结果与非流式同形态
+                    response = self.client.stream_chat_completion(
+                        label=label,
+                        model=self.client.model,
+                        messages=history,
+                        tools=active_tools,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                else:
+                    response = self.client.create_chat_completion(
+                        label=label,
+                        model=self.client.model,
+                        messages=history,
+                        tools=active_tools,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
                 choice = response.choices[0]
             except Exception as exc:
                 message = f"模型调用失败: {type(exc).__name__}: {exc}"

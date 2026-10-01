@@ -9,10 +9,13 @@ RAGKnowledgeBase 已拆分到 ai_agent/rag.py；
 
 import base64
 import logging
+import time
+from collections.abc import Callable
 
 import requests
 from openai import OpenAI
 
+from ai_agent import llm_trace
 from ai_agent.demos import (
     run_native_reasoning,
     run_plan_and_execute,
@@ -21,9 +24,17 @@ from ai_agent.demos import (
     run_reflexion,
     run_structured_extract,
 )
+from ai_agent.llm_trace import LLMCall
 from ai_agent.tools.fs import resolve_workspace_path
 
 log = logging.getLogger("Agent")
+
+# LLM 调用观察者签名：(阶段, 快照)。阶段为 "request"（即将发出请求）、
+# "stream"（流式增量，节流到 STREAM_NOTIFY_INTERVAL）或 "response"（已收到响应/失败）。
+LLMObserver = Callable[[str, LLMCall], None]
+
+# 流式增量通知的最小间隔（秒）：避免每个 token 都触发一次 UI 重绘
+STREAM_NOTIFY_INTERVAL = 0.12
 
 
 # ============================================================
@@ -41,6 +52,7 @@ class LMStudioClient:
         model: str = "auto",
         timeout: float = 120.0,
         client=None,
+        on_llm_call: LLMObserver | None = None,
     ):
         self.base_url = base_url
         self.api_key = api_key
@@ -53,6 +65,8 @@ class LMStudioClient:
         )
         self._model_checked = False  # 只在首次调用时打印状态
         self._model_cached_name = None  # 首次 ensure_model_loaded 成功后缓存，跳过后续 HTTP 检查
+        # LLM API 输入输出观察者：Web UI / CLI 用它把每次请求与响应呈现给学习者
+        self.on_llm_call: LLMObserver | None = on_llm_call
 
     def check_server_status(self) -> dict:
         """检测 LM Studio 服务是否运行，以及模型是否已加载"""
@@ -125,6 +139,104 @@ class LMStudioClient:
         self._model_cached_name = status["model_name"]
         return status["model_name"]
 
+    # ============================================================
+    # LLM 调用追踪 —— 所有 API 请求的唯一收口点
+    # ============================================================
+
+    def _notify_llm(self, phase: str, call: LLMCall) -> None:
+        """通知观察者；观察者自身的异常绝不允许影响正常的模型调用。"""
+        observer = self.on_llm_call
+        if observer is None:
+            return
+        try:
+            observer(phase, call)
+        except Exception:  # noqa: BLE001 - 观测失败不能拖垮主流程
+            log.debug("LLM 调用观察者异常", exc_info=True)
+
+    def _begin_trace(
+        self,
+        label: str,
+        *,
+        messages: list[dict] | None,
+        tools: list[dict] | None = None,
+        params: dict | None = None,
+        stream: bool = False,
+    ) -> LLMCall:
+        """建立快照并立即广播 request 阶段（UI 可以先把"输入"显示出来）。"""
+        call = llm_trace.begin_call(
+            label=label,
+            model=self.model,
+            messages=messages,
+            tools=tools,
+            params=params,
+            base_url=self.base_url,
+            stream=stream,
+        )
+        self._notify_llm("request", call)
+        return call
+
+    def _finish_trace(self, call: LLMCall, response=None, error: BaseException | None = None) -> None:
+        if error is not None:
+            llm_trace.apply_error(call, error)
+        else:
+            llm_trace.apply_response(call, response)
+        self._notify_llm("response", call)
+
+    def _create_completion(self, *, label: str, stream: bool = False, **kwargs):
+        """统一的 ``chat.completions.create`` 入口：先记录输入，再记录输出。"""
+        request = dict(kwargs)
+        stream = bool(request.pop("stream", stream))
+        call = self._begin_trace(
+            label,
+            messages=request.get("messages"),
+            tools=request.get("tools"),
+            params={k: v for k, v in request.items() if k not in {"model", "messages", "tools"}},
+            stream=stream,
+        )
+        try:
+            response = self.client.chat.completions.create(stream=stream, **request)
+        except Exception as exc:
+            self._finish_trace(call, error=exc)
+            raise
+        if stream:
+            # 流式：快照在迭代过程中持续更新，结束时才回填完成状态
+            return self._wrap_stream(call, response)
+        self._finish_trace(call, response=response)
+        return response
+
+    def _wrap_stream(self, call: LLMCall, stream):
+        """包装流式迭代器：逐 chunk 合并进快照，并按间隔广播 "stream" 阶段。
+
+        快照（``call.content`` 等）在生成过程中持续增长，Web UI 因此可以实时
+        展示输出；通知做了节流，避免每个 token 都触发一次界面重绘。
+        """
+        last_notify = 0.0
+        try:
+            for chunk in stream:
+                if llm_trace.append_stream_chunk(call, chunk):
+                    now = time.monotonic()
+                    if now - last_notify >= STREAM_NOTIFY_INTERVAL:
+                        last_notify = now
+                        self._notify_llm("stream", call)
+                yield chunk
+        except Exception as exc:
+            self._finish_trace(call, error=exc)
+            raise
+        llm_trace.apply_stream_end(call)
+        self._notify_llm("response", call)
+
+    def stream_chat_completion(self, label: str | None = None, **kwargs):
+        """流式发起调用，并把分片聚合成与非流式响应同形态的对象。
+
+        返回值的 ``choices[0].message`` 带有 ``content`` / ``reasoning_content`` /
+        ``tool_calls`` 和 ``model_dump()``，``AgentRuntime`` 用 ``stream=True``
+        时可以直接按非流式响应的方式消费，工具循环语义完全一致。
+        """
+        request = dict(kwargs)
+        request["stream"] = True
+        stream = self._create_completion(label=label or "chat.completions (stream)", **request)
+        return _aggregate_stream(stream)
+
     def summarize_messages(self, messages: list[dict], keep_recent: int = 4) -> list[dict]:
         """长对话摘要压缩：保留最近 N 条完整消息，较早历史交给 LLM 做摘要"""
         if len(messages) <= keep_recent + 2:
@@ -154,6 +266,7 @@ class LMStudioClient:
             ],
             temperature=0.1,
             max_tokens=512,
+            label="历史摘要压缩",
         )
 
         new_history = []
@@ -164,11 +277,17 @@ class LMStudioClient:
         return new_history
 
     def chat(
-        self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2048, stream: bool = False
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        stream: bool = False,
+        label: str = "chat",
     ):
         """发送聊天请求，自动检测模型加载状态"""
         self.ensure_model_loaded()
-        response = self.client.chat.completions.create(
+        response = self._create_completion(
+            label=label,
             model=self.model,
             messages=messages,
             temperature=temperature,
@@ -180,9 +299,10 @@ class LMStudioClient:
         return response.choices[0].message.content
 
     def chat_stream(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 2048):
-        """流式聊天，逐 token 输出"""
+        """流式聊天，逐 token 输出（快照由 _wrap_stream 在迭代过程中持续更新）"""
         self.ensure_model_loaded()
-        stream = self.client.chat.completions.create(
+        stream = self._create_completion(
+            label="chat_stream",
             model=self.model,
             messages=messages,
             temperature=temperature,
@@ -198,9 +318,12 @@ class LMStudioClient:
 
         return _generator()
 
-    def create_chat_completion(self, **kwargs):
-        """公开委托：转发到底层 OpenAI chat.completions.create（AgentRuntime 等内部组件使用）"""
-        return self.client.chat.completions.create(**kwargs)
+    def create_chat_completion(self, label: str | None = None, **kwargs):
+        """公开委托：转发到底层 OpenAI chat.completions.create（AgentRuntime 等内部组件使用）
+
+        ``label`` 只用于 UI 展示本次调用的用途（如"Agent 循环 · 第 2 轮"），不会发给模型。
+        """
+        return self._create_completion(label=label or "chat.completions", **kwargs)
 
     def chat_with_tools(
         self,
@@ -215,6 +338,7 @@ class LMStudioClient:
         tool_executor=None,
         on_event=None,
         session_id: str | None = None,
+        stream: bool = False,
     ):
         """Delegate the tool loop to :class:`AgentRuntime` and return final text."""
         from ai_agent.runtime import AgentRuntime
@@ -231,6 +355,7 @@ class LMStudioClient:
             max_tokens=max_tokens,
             skill_registry=skill_registry,
             mcp_manager=mcp_manager,
+            stream=stream,
         ):
             if on_event is not None:
                 on_event(event)
@@ -312,7 +437,8 @@ class LMStudioClient:
         mime = mime_map[ext]
         with open(safe_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
-        response = self.client.chat.completions.create(
+        response = self._create_completion(
+            label="图像识别",
             model=self.model,
             messages=[
                 {
@@ -340,3 +466,90 @@ class LMStudioClient:
     ) -> str:
         """结构化输出：按字段提取 JSON，带围栏清洗 + 失败重试（强化 prompt）"""
         return run_structured_extract(self, text, fields, temperature=temperature, max_tokens=max_tokens)
+
+
+# ============================================================
+# 流式分片聚合 —— 把 stream chunks 还原成非流式响应的形态
+# ============================================================
+
+
+class _AggregatedToolFunction:
+    def __init__(self):
+        self.name = ""
+        self.arguments = ""
+
+
+class _AggregatedToolCall:
+    def __init__(self):
+        self.id = ""
+        self.type = "function"
+        self.function = _AggregatedToolFunction()
+
+    def model_dump(self) -> dict:
+        return {
+            "id": self.id,
+            "type": self.type,
+            "function": {"name": self.function.name, "arguments": self.function.arguments},
+        }
+
+
+class _AggregatedMessage:
+    def __init__(self):
+        self.role = "assistant"
+        self.content: str | None = ""
+        self.reasoning_content = ""
+        self.tool_calls: list[_AggregatedToolCall] | None = []
+
+    def model_dump(self) -> dict:
+        data: dict = {"role": self.role, "content": self.content or None}
+        if self.tool_calls:
+            data["tool_calls"] = [tool_call.model_dump() for tool_call in self.tool_calls]
+        return data
+
+
+class _AggregatedChoice:
+    def __init__(self):
+        self.index = 0
+        self.finish_reason: str | None = None
+        self.message = _AggregatedMessage()
+
+
+class _AggregatedResponse:
+    def __init__(self, choice: _AggregatedChoice):
+        self.choices = [choice]
+
+
+def _aggregate_stream(stream) -> _AggregatedResponse:
+    """消费一个流式迭代器，把 content / tool_calls 分片聚合成完整响应。"""
+    choice = _AggregatedChoice()
+    tool_calls: list[_AggregatedToolCall] = []
+    for chunk in stream:
+        chunk_choices = getattr(chunk, "choices", None)
+        if not chunk_choices:
+            continue
+        delta = chunk_choices[0].delta
+        content = getattr(delta, "content", None)
+        if content:
+            choice.message.content = (choice.message.content or "") + content
+        reasoning = getattr(delta, "reasoning_content", None)
+        if reasoning:
+            choice.message.reasoning_content += reasoning
+        for tool_call in getattr(delta, "tool_calls", None) or []:
+            index = int(getattr(tool_call, "index", 0) or 0)
+            while len(tool_calls) <= index:
+                tool_calls.append(_AggregatedToolCall())
+            aggregated = tool_calls[index]
+            if getattr(tool_call, "id", None):
+                aggregated.id = tool_call.id
+            function = getattr(tool_call, "function", None)
+            if function is not None:
+                if getattr(function, "name", None):
+                    aggregated.function.name += function.name
+                if getattr(function, "arguments", None):
+                    aggregated.function.arguments += function.arguments
+        if chunk_choices[0].finish_reason:
+            choice.finish_reason = chunk_choices[0].finish_reason
+    choice.message.tool_calls = tool_calls or None
+    if not choice.message.content:
+        choice.message.content = None
+    return _AggregatedResponse(choice)

@@ -32,6 +32,7 @@ from ai_agent.app_core import (
     ensure_test_image,
     filter_tool_schemas,
 )
+from ai_agent.cli_trace import CallRecorder, get_console, render_calls
 from ai_agent.client import LMStudioClient
 from ai_agent.config import Config, load_env
 from ai_agent.console import configure_utf8_output
@@ -89,6 +90,10 @@ class AgentDemoApp:
             self.cfg.model,
             timeout=self.cfg.request_timeout,
         )
+        # 收集每轮的 LLM API 调用快照：回复后打印摘要，/calls 查看完整输入输出
+        self.llm_recorder = CallRecorder()
+        self.client.on_llm_call = self.llm_recorder
+        self.show_llm_summary = True
         self.rag: RAGKnowledgeBase | None = None
         self.tool_map: dict = {}
         self.tool_executor = None
@@ -225,6 +230,7 @@ class AgentDemoApp:
         print("  - 思维链解答：一个人花8元买鸡，9元卖出，10元买回，11元卖出，赚了多少")
         print("  - 用 ReAct 模式解答：北京现在天气怎么样，天气好的话帮我推荐几本 Agent 好书")
         print("  - 用多 Agent 协作写一篇关于「AI Agent」的科普文章（Planner+Executor+Critic）")
+        print("  - /calls 查看上一轮 LLM API 调用的完整输入输出（/calls json 附请求/响应 JSON）")
         print("  - exit / quit / 退出  结束程序")
         print()
 
@@ -276,6 +282,7 @@ class AgentDemoApp:
             try:
                 print("\n助手> ", end="", flush=True)
                 t0 = time.time()
+                self.llm_recorder.reset()
                 reply = self.client.chat_with_tools(
                     messages=self.history,
                     tools=filter_tool_schemas(self.TOOLS, self.tool_executor.policy),
@@ -287,6 +294,8 @@ class AgentDemoApp:
                 )
                 dt = time.time() - t0
                 print(reply)
+                if self.show_llm_summary:
+                    get_console().print(self.llm_recorder.summary_line())
                 log.info("交互完成 (%.1fs, history=%d msg)", dt, len(self.history))
 
                 self.history.append({"role": "assistant", "content": reply})
@@ -375,6 +384,7 @@ class AgentDemoApp:
             "/clear": self._cmd_clear,
             "/current": self._cmd_current,
             "/db": self._cmd_db,
+            "/calls": self._cmd_calls,
         }
         handler = handlers.get(cmd)
         if handler is None:
@@ -399,9 +409,20 @@ class AgentDemoApp:
   /clear           清空当前会话的消息历史
   /current         显示当前会话信息
   /db              显示数据库路径
+  /calls [json]    查看上一轮 LLM API 调用的完整输入输出（json 附带请求/响应 JSON）
+  /calls on|off    开关每轮回复后的 LLM 调用摘要行
   /help            显示此帮助
   /quit            退出程序
 """)
+        return ""
+
+    def _cmd_calls(self, arg: str) -> str:
+        arg = arg.strip().lower()
+        if arg in {"on", "off"}:
+            self.show_llm_summary = arg == "on"
+            print(f"  LLM 调用摘要行已{'开启' if self.show_llm_summary else '关闭'}")
+            return ""
+        render_calls(get_console(), self.llm_recorder.calls, show_json=(arg == "json"))
         return ""
 
     def _cmd_sessions(self, arg: str) -> str:

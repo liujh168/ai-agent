@@ -15,6 +15,7 @@ def run_plan_and_execute(
     )
     plan_text = (
         client.create_chat_completion(
+            label="Plan-and-Execute · 规划",
             model=client.model,
             messages=[{"role": "user", "content": plan_prompt}],
             temperature=temperature,
@@ -48,6 +49,7 @@ def run_plan_and_execute(
         )
         result = (
             client.create_chat_completion(
+                label=f"Plan-and-Execute · 子任务 {i}/{len(subtasks)}",
                 model=client.model,
                 messages=[{"role": "user", "content": exec_prompt}],
                 temperature=temperature,

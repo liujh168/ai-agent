@@ -90,6 +90,7 @@ def run_react(
     for iteration in range(1, max_iterations + 1):
         emit(f"│\n│  🔄 第 {iteration} 轮")
         response = client.create_chat_completion(
+            label=f"ReAct · 第 {iteration} 轮",
             model=client.model,
             messages=history,
             temperature=temperature,

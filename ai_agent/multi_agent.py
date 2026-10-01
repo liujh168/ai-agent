@@ -164,7 +164,9 @@ def run_multi_agent(
         {"role": "system", "content": ROLE_PROMPTS["planner"]},
         {"role": "user", "content": f"请为下面的任务制定执行计划：\n\n{user_task}"},
     ]
-    plan_text = client.chat(planner_msgs, temperature=temperature, max_tokens=512)
+    plan_text = client.chat(
+        planner_msgs, temperature=temperature, max_tokens=512, label="Planner 规划"
+    )
     _emit(f"\n📊 Planner 输出:\n{plan_text}")
 
     subtasks = _parse_subtasks(plan_text)
@@ -192,7 +194,9 @@ def run_multi_agent(
                 ),
             },
         ]
-        critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=512)
+        critic_reply = client.chat(
+            critic_msgs, temperature=temperature, max_tokens=512, label="Critic 审计划"
+        )
         _emit(f"\n📝 Critic 评审:\n{critic_reply}")
 
         if _parse_critic_decision(critic_reply):
@@ -212,7 +216,9 @@ def run_multi_agent(
                 ),
             },
         ]
-        plan_text = client.chat(planner_msgs, temperature=temperature, max_tokens=512)
+        plan_text = client.chat(
+            planner_msgs, temperature=temperature, max_tokens=512, label="Planner 重规划"
+        )
         subtasks = _parse_subtasks(plan_text) or [plan_text.strip()]
         _emit(f"\n📊 Planner 重新输出:\n{plan_text}")
         _emit(f"\n🔍 新解析到 {len(subtasks)} 个子任务")
@@ -239,7 +245,12 @@ def run_multi_agent(
                 ),
             },
         ]
-        exec_output = client.chat(executor_msgs, temperature=temperature, max_tokens=max_tokens)
+        exec_output = client.chat(
+            executor_msgs,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            label=f"Executor 子任务 {i}/{len(subtasks)}",
+        )
         _emit(f"\n📄 Executor 子任务 {i} 产出:\n{exec_output[:300]}{'…' if len(exec_output) > 300 else ''}")
 
         for round_num in range(1, max_rounds + 1):
@@ -257,7 +268,12 @@ def run_multi_agent(
                     ),
                 },
             ]
-            critic_reply = client.chat(critic_msgs, temperature=temperature, max_tokens=512)
+            critic_reply = client.chat(
+                critic_msgs,
+                temperature=temperature,
+                max_tokens=512,
+                label=f"Critic 审子任务 {i}",
+            )
             _emit(f"   Critic: {critic_reply[:200]}{'…' if len(critic_reply) > 200 else ''}")
 
             if _parse_critic_decision(critic_reply):
@@ -276,7 +292,12 @@ def run_multi_agent(
                     ),
                 },
             ]
-            exec_output = client.chat(executor_msgs, temperature=temperature, max_tokens=max_tokens)
+            exec_output = client.chat(
+                executor_msgs,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                label=f"Executor 修正子任务 {i}",
+            )
             _emit(f"   Executor 修正后产出: {exec_output[:200]}…")
         else:
             _emit(f"   [WARN] Critic 连续 {max_rounds} 轮不通过，保留当前产出继续推进")
@@ -310,7 +331,9 @@ def run_multi_agent(
             ),
         },
     ]
-    integrated = client.chat(final_integrate_msgs, temperature=temperature, max_tokens=max_tokens)
+    integrated = client.chat(
+        final_integrate_msgs, temperature=temperature, max_tokens=max_tokens, label="Planner 汇总整合"
+    )
 
     _emit(f"\n{separator}")
     _emit(f"🎯 最终交付（已整合）:\n{integrated}")

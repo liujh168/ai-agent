@@ -13,6 +13,7 @@ def run_reasoning(client, messages: list[dict], temperature: float = 0.7, max_to
     last = guided[-1]
     guided[-1] = {**last, "content": f"{last['content']}\n\n{chain_prompt}"}
     response = client.create_chat_completion(
+        label="思维链（提示词引导）",
         model=client.model,
         messages=guided,
         temperature=temperature,
@@ -32,6 +33,7 @@ def run_native_reasoning(
     client.ensure_model_loaded()
     try:
         response = client.create_chat_completion(
+            label="原生推理（reasoning_effort）",
             model=client.model,
             messages=messages,
             temperature=temperature,
