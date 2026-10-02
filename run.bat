@@ -1,6 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal
+cd /d "%~dp0"
 
 echo.
 echo  🤖 AI Agent 学习演示 · 一键启动
