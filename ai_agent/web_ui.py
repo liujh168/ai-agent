@@ -815,6 +815,30 @@ class AgentApp:
         self.trace(state, f"✨ 已创建新会话 {session_id}", "info")
         return self.trace_html(state), self.llm_panel_html(state), [], state
 
+    def delete_all_sessions(self, state: SessionState | None) -> tuple[str, str, list, SessionState]:
+        state = self.ensure_state(state)
+        deleted = self.store.delete_all_sessions()
+        mode = state.get("mode", "chat")
+        session_id = self.store.create_session(title="新会话", mode=mode)
+        state = self.new_state(mode=mode, session_id=session_id)
+        self.trace(state, f"🗑 已删除全部历史会话（{deleted} 个），并创建新会话 {session_id}", "info")
+        return self.trace_html(state), self.llm_panel_html(state), [], state
+
+    def delete_session(
+        self, session_id: str, state: SessionState | None
+    ) -> tuple[Any, Any, Any, SessionState, bool]:
+        """删除单个会话；若删的是当前会话则自动切换到新会话（返回最后一项标记是否发生了切换）"""
+        state = self.ensure_state(state)
+        session = self.store.get_session(session_id) if session_id else None
+        if session is None:
+            return gr.update(), gr.update(), gr.update(), state, False
+        self.store.delete_session(session.id)
+        if session.id == state.get("session_id"):
+            trace, panel, history, new_state = self.new_session(state)
+            return trace, panel, history, new_state, True
+        self.trace(state, f"🗑 已删除会话「{session.title}」", "info")
+        return self.trace_html(state), gr.update(), gr.update(), state, False
+
     def switch_session(
         self,
         session_id: str,
@@ -1222,6 +1246,8 @@ def build_ui(app: AgentApp) -> gr.Blocks:
         )
 
         session_state = gr.State(app.new_state())
+        # 会话列表变更信号：任何增删会话的事件都输出最新列表来触发 @gr.render 重绘
+        sessions_data = gr.State(app.list_sessions())
 
         with gr.Row():
             with gr.Column(scale=1, min_width=270):
@@ -1236,7 +1262,7 @@ def build_ui(app: AgentApp) -> gr.Blocks:
                     label="Agent 模式",
                 )
 
-                with gr.Accordion("🎛️ 采样参数", open=True):
+                with gr.Accordion("🎛️ 采样参数", open=False):
                     temp_slider = gr.Slider(
                         minimum=0.0,
                         maximum=1.5,
@@ -1276,15 +1302,17 @@ def build_ui(app: AgentApp) -> gr.Blocks:
                         "改它就能立刻在右侧看到效果。</span>"
                     )
 
-                gr.Markdown("### 📁 会话管理")
-                session_radio = gr.Radio(
-                    choices=[],
-                    label="历史会话（点击加载）",
-                    interactive=True,
-                )
-                with gr.Row():
-                    btn_new_session = gr.Button("✨ 新会话", variant="primary")
-                    btn_refresh_sessions = gr.Button("🔄 刷新列表")
+                with gr.Accordion("📁 会话管理", open=False):
+                    session_list_container = gr.Group()
+                    with gr.Row():
+                        btn_new_session = gr.Button("✨ 新会话", variant="primary")
+                        btn_refresh_sessions = gr.Button("🔄 刷新列表")
+                    btn_delete_all_sessions = gr.Button("🗑 删除全部历史会话", variant="stop")
+                    with gr.Column(visible=False) as delete_all_confirm_box:
+                        gr.Markdown("⚠️ 确认删除全部历史会话？此操作不可恢复。")
+                        with gr.Row():
+                            btn_confirm_delete_all = gr.Button("确认删除", variant="stop", size="sm")
+                            btn_cancel_delete_all = gr.Button("取消", size="sm")
 
                 gr.Markdown("### 📝 快捷示例")
                 with gr.Row():
@@ -1348,10 +1376,8 @@ def build_ui(app: AgentApp) -> gr.Blocks:
         def on_reset_prompt(state):
             return app.reset_system_prompt(state)
 
-        def on_session_list_refresh():
-            sessions = app.list_sessions()
-            choices = [(f"{title}  {info}", session_id) for session_id, title, info in sessions]
-            return gr.update(choices=choices or [("暂无历史会话", "")])
+        def load_sessions_data():
+            return app.list_sessions()
 
         def _param_updates(state):
             params = {**DEFAULT_RUN_PARAMS, **(state.get("params") or {})}
@@ -1366,6 +1392,11 @@ def build_ui(app: AgentApp) -> gr.Blocks:
             trace, panel, history, new_state, mode_update = app.switch_session(session_id, state)
             return (trace, panel, history, new_state, mode_update, *_param_updates(new_state))
 
+        def on_session_delete(session_id, state):
+            trace, panel, history, new_state, switched = app.delete_session(session_id, state)
+            param_updates = _param_updates(new_state) if switched else (gr.update(),) * 4
+            return (trace, panel, history, new_state, load_sessions_data(), *param_updates)
+
         def on_new_session(state):
             trace, panel, history, new_state = app.new_session(state)
             return (
@@ -1373,8 +1404,20 @@ def build_ui(app: AgentApp) -> gr.Blocks:
                 panel,
                 history,
                 new_state,
-                on_session_list_refresh(),
+                load_sessions_data(),
                 *_param_updates(new_state),
+            )
+
+        def on_delete_all_sessions(state):
+            trace, panel, history, new_state = app.delete_all_sessions(state)
+            return (
+                trace,
+                panel,
+                history,
+                new_state,
+                load_sessions_data(),
+                *_param_updates(new_state),
+                gr.update(visible=False),
             )
 
         def on_send(user_text, history, state):
@@ -1404,24 +1447,9 @@ def build_ui(app: AgentApp) -> gr.Blocks:
             [prompt_box, trace_output, session_state],
         )
         btn_refresh_sessions.click(
-            on_session_list_refresh,
+            load_sessions_data,
             None,
-            session_radio,
-        )
-        session_radio.select(
-            on_session_select,
-            [session_radio, session_state],
-            [
-                trace_output,
-                llm_output,
-                chatbot,
-                session_state,
-                mode_radio,
-                temp_slider,
-                tokens_slider,
-                iter_slider,
-                prompt_box,
-            ],
+            sessions_data,
         )
         btn_new_session.click(
             on_new_session,
@@ -1431,11 +1459,37 @@ def build_ui(app: AgentApp) -> gr.Blocks:
                 llm_output,
                 chatbot,
                 session_state,
-                session_radio,
+                sessions_data,
                 temp_slider,
                 tokens_slider,
                 iter_slider,
                 prompt_box,
+            ],
+        )
+        btn_delete_all_sessions.click(
+            lambda: gr.update(visible=True),
+            None,
+            delete_all_confirm_box,
+        )
+        btn_cancel_delete_all.click(
+            lambda: gr.update(visible=False),
+            None,
+            delete_all_confirm_box,
+        )
+        btn_confirm_delete_all.click(
+            on_delete_all_sessions,
+            session_state,
+            [
+                trace_output,
+                llm_output,
+                chatbot,
+                session_state,
+                sessions_data,
+                temp_slider,
+                tokens_slider,
+                iter_slider,
+                prompt_box,
+                delete_all_confirm_box,
             ],
         )
         send_outputs = [trace_output, llm_output, chatbot, msg_input, session_state]
@@ -1476,7 +1530,62 @@ def build_ui(app: AgentApp) -> gr.Blocks:
             None,
             msg_input,
         )
-        demo.load(on_session_list_refresh, None, session_radio)
+        def _make_session_load_handler(session_id):
+            def _handler(state):
+                return on_session_select(session_id, state)
+
+            return _handler
+
+        def _make_session_delete_handler(session_id):
+            def _handler(state):
+                return on_session_delete(session_id, state)
+
+            return _handler
+
+        with session_list_container:
+
+            @gr.render(inputs=sessions_data)
+            def render_sessions(_sessions):
+                sessions = app.list_sessions()
+                if not sessions:
+                    gr.Markdown("暂无历史会话")
+                    return
+                for session_id, title, info in sessions:
+                    with gr.Row():
+                        btn_load = gr.Button(f"{title}  {info}", size="sm", scale=6)
+                        btn_del = gr.Button("🗑", size="sm", variant="stop", scale=1, min_width=36)
+                    btn_load.click(
+                        _make_session_load_handler(session_id),
+                        session_state,
+                        [
+                            trace_output,
+                            llm_output,
+                            chatbot,
+                            session_state,
+                            mode_radio,
+                            temp_slider,
+                            tokens_slider,
+                            iter_slider,
+                            prompt_box,
+                        ],
+                    )
+                    btn_del.click(
+                        _make_session_delete_handler(session_id),
+                        session_state,
+                        [
+                            trace_output,
+                            llm_output,
+                            chatbot,
+                            session_state,
+                            sessions_data,
+                            temp_slider,
+                            tokens_slider,
+                            iter_slider,
+                            prompt_box,
+                        ],
+                    )
+
+        demo.load(load_sessions_data, None, sessions_data)
 
     return demo
 

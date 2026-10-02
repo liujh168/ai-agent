@@ -144,6 +144,13 @@ class ChatStore:
             self.conn.commit()
         return cur.rowcount > 0
 
+    def delete_all_sessions(self) -> int:
+        """删除所有会话，messages 通过 ON DELETE CASCADE 一并清理，返回删除条数"""
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM sessions")
+            self.conn.commit()
+        return cur.rowcount
+
     def touch_session(self, session_id: str) -> None:
         """更新 updated_at 时间戳"""
         with self._lock:
