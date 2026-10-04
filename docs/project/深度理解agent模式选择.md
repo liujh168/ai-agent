@@ -12,9 +12,9 @@
 
 | 循环部件 | FC（runtime.py） | ReAct（react.py） |
 |---|---|---|
-| 迭代计数 + 上限 | `for iteration in range(1, max_iterations+1)`，默认 5（:90, :27） | 同一行代码，默认 6（:90, :42） |
+| 迭代计数 + 上限 | `for iteration in range(1, max_iterations+1)`，默认 5（:90, :27） | 同一行代码，默认 6（:90, :41） |
 | 请求模型 | `create_chat_completion(messages=history, tools=...)`（:104） | `create_chat_completion(messages=history)`（:92） |
-| 解析输出，分流 | `finish_reason == "tool_calls"` → 执行工具；否则 → final 退出（:121, :169-178） | 正则解析：有 `Final Answer` → 退出；有 `Action` → 执行工具（:105-109, :115） |
+| 解析输出，分流 | `finish_reason == "tool_calls"` → 执行工具；否则 → final 退出（:121, :169-179） | 正则解析：有 `Final Answer` → 退出；有 `Action` → 执行工具（:105-109, :115） |
 | 执行工具 | `executor.execute(name, arguments)`（:143） | `tool_map[action_name](**args)`（:130） |
 | 结果回灌上下文 | `history.append({"role": "tool", ...})`（:145-151） | `history.append({"role": "user", "content": f"Observation: ..."})`（:139） |
 | 参数解析失败兜底 | 返回错误让模型"按 schema 重新调用"（:135-141） | "Action Input 不是合法 JSON"（:124-125） |
@@ -37,7 +37,7 @@ LLM 是无状态的纯函数：每次请求都是"给完整上下文 → 返回�
 
 这个"模型 → 宿主 → 模型"的往返，最小形态就是循环的一次迭代。没有循环，工具调用的结果永远回不到模型手里。两个看似的例外都不是例外：
 
-- **模型一轮答完不调工具**：循环体只跑一圈就退出（runtime.py:169-178），但循环结构必须在场，因为要不要循环是模型运行时决定的，宿主事先不知道；
+- **模型一轮答完不调工具**：循环体只跑一圈就退出（runtime.py:169-179），但循环结构必须在场，因为要不要循环是模型运行时决定的，宿主事先不知道；
 - **只调一次工具**：也至少需要两次请求（提出调用 → 回灌结果后作答），即循环迭代两次。真正无循环的只有零工具的纯对话——那已经不是 Agent。
 
 所以：**Agent = 循环 + 模型 + 工具。FC 与 ReAct 竞争的不是"要不要循环"，而是"循环里模型表达意图、宿主解析意图用什么协议"。** 这也是理解一切 Agent 框架的万能钥匙：LangChain 的 `AgentExecutor`、AutoGen、Assistants API，剥到底都是同一个 `for` 循环；框架差异全部落在两个编码层问题——意图怎么表达、结果怎么回灌。
@@ -169,7 +169,7 @@ if mode == "react":
 elif mode == "multi_agent":
     self._run_multi_agent(state, user_text, event_queue)
 else:
-    # chat 默认分支 → chat_with_tools
+    self._run_chat(state, user_text, event_queue)  # chat 默认分支 → chat_with_tools
 ```
 
 UI 的"模式"是 **dispatch 开关**，回答用户视角的一维问题："我这条消息将被哪种执行策略处理？"从控制流看三者确实并列——同一 `if/elif/else` 的三个互斥分支，共享会话状态与事件队列。**实现上的并列性与概念上的正交性不矛盾**：正交维度被"拍平"成菜单，是因为每个 demo 恰好只占组合空间的一个格子（单Agent+FC / 单Agent+ReAct / 多Agent+纯chat），菜单列的是被实例化了的组合。

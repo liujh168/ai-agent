@@ -26,12 +26,12 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                              用户输入                                    │
-│              "帮我规划并写一篇关于 AI Agent 的科普文章"                    │
+│              "帮我规划并写一篇AI科普文章"                                  │
 └────────────────────────────┬────────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  AgentRuntime.run() 的 Skill 路由层（runtime.py:47-67）                  │
+│  AgentRuntime.run() 的 Skill 路由层（runtime.py:48-68）                  │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │ 取最后一条用户消息 → skill_registry.match(user_input)            │   │
 │  │                                                                  │   │
@@ -42,7 +42,7 @@
                              │ 命中
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  AgentRuntime.run()（runtime.py:58-67）— Skill 在统一工具循环内执行       │
+│  AgentRuntime.run()（runtime.py:59-68）— Skill 在统一工具循环内执行       │
 │                                                                         │
 │  ① 替换 system prompt                                                   │
 │     messages[0].content = skill.instructions （Skill.md 的 Markdown 正文）│
@@ -125,7 +125,7 @@ entry_mode: auto
 
 ### 不引入 PyYAML 依赖
 
-项目的 Frontmatter 解析用的是纯正则（见 `ai_agent/skill.py:88-128` 的 `_parse_frontmatter()`），支持 `key: value`、`key: [a, b]` 和：
+项目的 Frontmatter 解析用的是纯正则（见 `ai_agent/skill.py:100-141` 的 `_parse_frontmatter()`），支持 `key: value`、`key: [a, b]` 和：
 ```yaml
 key:
   - item1
@@ -139,7 +139,7 @@ key:
 
 ### 4.1 SkillRegistry：发现、加载、匹配 Skill 的"大脑"
 
-**位置**：`ai_agent/skill.py:136-288`
+**位置**：`ai_agent/skill.py:149-333`
 
 它做三件事：**扫描目录 → 解析元数据 → 关键词匹配**。
 
@@ -147,39 +147,58 @@ key:
 
 ```python
 class SkillRegistry:
-    def __init__(self, skill_dir: str, available_tools: list[str]):
+    def __init__(self, skill_dir: str, available_tools: list[str] | None = None):
         self.skills = {}          # name → SkillDef
         self._errors = []
 
         if not os.path.isdir(skill_dir):
             return                 # 目录不存在 → 零个 Skill，完全安全
 
-        for md_path in glob.glob(os.path.join(skill_dir, "*.md")):
-            skill = self._parse_md(md_path, available_tools)
-            self.skills[skill.name] = skill
+        self._load_all(skill_dir, set(available_tools))
+
+    def _load_all(self, skill_dir, available_tools):
+        for md_path in sorted(glob.glob(os.path.join(skill_dir, "*.md"))):
+            try:
+                skill = self._parse_md(md_path, available_tools)
+                if skill is None:
+                    continue
+                self.skills[skill.name] = skill
+            except Exception as e:
+                self._errors.append(...)   # 单个文件加载失败只记错误，不阻塞启动
 ```
 
 启动时一次性加载，之后只读不写。`available_tools` 用来校验 Skill 声明的 `required_tools` 是否存在（Skill 声明了不存在的工具时跳过，不会崩溃）。
 
 #### 关键词匹配
 
-这是 Skill 路由的核心算法（`ai_agent/skill.py:218-260`）：
+这是 Skill 路由的核心算法（`ai_agent/skill.py:267-316`）：
 
 ```python
 def match(self, user_input: str) -> Optional[SkillDef]:
     best_score = 0.0
     best_skill = None
     user_lower = user_input.lower()
+    input_len = max(len(user_input), 1)
 
     for skill in self.skills.values():
-        hit_chars = 0
-        for kw in skill.trigger_keywords:
-            if kw and kw.lower() in user_lower:
-                hit_chars += len(kw)
-        score = hit_chars / len(user_input)
+        matched_keywords = [kw.lower() for kw in skill.trigger_keywords
+                            if kw and kw.lower() in user_lower]
+        if not matched_keywords:
+            continue
+        # 命中字符数按"覆盖位置"计算：重叠的关键词不重复计数
+        covered_positions: set[int] = set()
+        for keyword in matched_keywords:
+            start = 0
+            while True:
+                found = user_lower.find(keyword, start)
+                if found < 0:
+                    break
+                covered_positions.update(range(found, found + len(keyword)))
+                start = found + 1
+        hit_chars = len(covered_positions)
+        score = hit_chars / input_len
         # 额外奖励：多个关键词同时命中
-        hit_count = sum(1 for kw in skill.trigger_keywords
-                        if kw and kw.lower() in user_lower)
+        hit_count = len(set(matched_keywords))
         if hit_count >= 2:
             score *= 1.3
         if score > best_score and score > 0.3:
@@ -188,21 +207,21 @@ def match(self, user_input: str) -> Optional[SkillDef]:
     return best_skill
 ```
 
-**算法本质**：命中关键词的字符数占用户输入总长度的比例。长关键词、多关键词命中 → 高分；score > 0.3 才有效（防止单字/短关键词误触）。多个关键词同时命中额外 1.3x 奖励。
+**算法本质**：命中关键词覆盖的字符数（重叠部分只算一次）占用户输入总长度的比例。长关键词、多关键词命中 → 高分；score > 0.3 才有效（防止单字/短关键词误触）。多个关键词同时命中额外 1.3x 奖励。
 
 **实际效果示例（当前 `plan_and_write` Skill 的 trigger_keywords）**：
 ```
 "帮我规划并写一篇文章" (10字)
-  命中: "规划并写"(4字)
-  score = 4/10 = 0.40 > 0.3  → ✅ 匹配
+  命中: "规划" + "规划并写"（覆盖 4 字，去重后）, hit_count=2 → 1.3x 奖励
+  score = (4/10) * 1.3 = 0.52 > 0.3  → ✅ 匹配
 
 "规划一下AI Agent的学习路线" (17字)
-  命中: "规划"(2字) + "规划一下"(4字) = 6字, hit_count=2 → 1.3x 奖励
-  score = (6/17) * 1.3 = 0.46 > 0.3  → ✅ 匹配
+  命中: "规划" + "规划一下"（覆盖 4 字，去重后）, hit_count=2 → 1.3x 奖励
+  score = (4/17) * 1.3 ≈ 0.31 > 0.3  → ✅ 匹配
 
 "拆解一下这个复杂问题" (10字)
-  命中: "拆解"(2字) + "拆解一下"(4字) = 6字, hit_count=2 → 1.3x 奖励
-  score = (6/10) * 1.3 = 0.78 > 0.3  → ✅ 匹配
+  命中: "拆解" + "拆解一下"（覆盖 4 字，去重后）, hit_count=2 → 1.3x 奖励
+  score = (4/10) * 1.3 = 0.52 > 0.3  → ✅ 匹配
 
 "北京天气怎么样" (7字)
   命中: 无 → ❌ 不匹配
@@ -217,7 +236,7 @@ def match(self, user_input: str) -> Optional[SkillDef]:
 
 ### 4.2 AgentRuntime：Skill 的执行循环
 
-**位置**：`ai_agent/runtime.py:47-67`
+**位置**：`ai_agent/runtime.py:48-68`
 
 Skill 的"引擎"现在收编在统一的工具循环 `AgentRuntime.run()` 里（CLI 和 Web 共用），命中 Skill 时只做三件事：
 
@@ -251,7 +270,8 @@ active_tools = [
 max_iterations = selected_skill.max_rounds  # 命中 Skill 后，循环上限换成它的 max_rounds
 
 for iteration in range(1, max_iterations + 1):
-    response = self.client.client.chat.completions.create(
+    response = self.client.create_chat_completion(  # 或 stream_chat_completion（流式分支）
+        label=f"Agent 循环 · 第 {iteration}/{max_iterations} 轮",
         model=self.client.model, messages=history,
         tools=active_tools,  # 用过滤后的
         temperature=temperature, max_tokens=max_tokens,
@@ -266,7 +286,7 @@ for iteration in range(1, max_iterations + 1):
 
 ### 4.3 AgentRuntime.run() 的 Skill 路由层
 
-**位置**：`ai_agent/runtime.py:47-67`
+**位置**：`ai_agent/runtime.py:48-68`
 
 在统一工具循环 `AgentRuntime.run()` 开头有一段前置判断（`chat_with_tools()` 只是它的薄封装）：
 
@@ -296,16 +316,19 @@ if selected_skill is not None:
 
 ### 4.4 build_system_prompt()：动态合成
 
-**位置**：`ai_agent/app_core.py:67-83`
+**位置**：`ai_agent/app_core.py:80-96`
 
 ```python
 def build_system_prompt(skill_registry=None) -> str:
     prompt = BASE_SYSTEM_PROMPT     # 原始静态版（= 旧的 SYSTEM_PROMPT）
     if skill_registry is not None and skill_registry.count > 0:
-        prompt += "\n\n## 可用的专业能力（Skills）\n\n"
+        skill_section = "\n\n## 可用的专业能力（Skills）\n\n"
+        skill_section += "下面这些是预定义的复合工作流（多步编排 + 专属 Prompt），"
+        skill_section += "当用户请求匹配时会自动激活。\n\n"
         for s in skill_registry.list():
             kws = ", ".join(s.trigger_keywords[:3])
-            prompt += f"- 【{s.name}】{s.description}（关键词: {kws}）\n"
+            skill_section += f"- 【{s.name}】{s.description}（关键词: {kws}）\n"
+        prompt += skill_section
     return prompt
 ```
 
@@ -315,7 +338,7 @@ def build_system_prompt(skill_registry=None) -> str:
 
 ## 五、完整流程走一遍
 
-假设用户输入：**"帮我规划并写一篇关于 AI Agent 的科普文章"**
+假设用户输入：**"帮我规划并写一篇AI科普文章"**
 
 ```
 Step 1 — 启动时
@@ -328,10 +351,10 @@ Step 1 — 启动时
 Step 2 — 用户输入进 chat_with_tools()
   client.py: chat_with_tools(messages, tools, tool_map, skill_registry=...)
     → 委托给 AgentRuntime.run()，开头做前置路由判断
-      → 取最后一条用户消息: "帮我规划并写一篇关于 AI Agent 的科普文章"
+      → 取最后一条用户消息: "帮我规划并写一篇AI科普文章"
       → skill_registry.match()
-          → "规划一下" 命中 trigger_keywords
-          → score = 4/15 ≈ 0.27（实际看关键词表有多少命中...）
+          → "规划" + "规划并写" 命中 trigger_keywords（覆盖 4 字，hit_count=2 → 1.3x 奖励）
+          → score = (4/14) * 1.3 ≈ 0.37 > 0.3
           → 返回 plan_and_write Skill ✅
 
 Step 3 — AgentRuntime 命中 Skill，就地切换执行上下文

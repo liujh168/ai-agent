@@ -1,6 +1,6 @@
 # API 接口文档 — Tool Schema 详解
 
-> 本项目共 **21 个 Function Calling 工具**，定义在 `ai_agent/app_core.py` 的 `TOOL_SCHEMAS` 列表中。
+> 本项目共 **22 个 Function Calling 工具**，定义在 `ai_agent/app_core.py` 的 `TOOL_SCHEMAS` 列表中。
 > 本文档按功能分组，每个工具标注：参数、风险等级、源码位置、调用示例。
 
 ---
@@ -13,6 +13,7 @@
 - [SQL 查询（1）](#sql-查询1)
 - [代码/终端执行（2）](#代码终端执行2)
 - [元工具（4）](#元工具4)
+- [博客发布（1）](#博客发布1)
 - [MCP 远端工具（动态）](#mcp-远端工具动态)
 
 ---
@@ -27,7 +28,7 @@
   |------|------|------|------|
   | `city` | string | ✅ | 城市名称，如"北京"、"上海" |
 - **风险等级**：read
-- **源码**：`tools/demo.py` + `app_core.py#L101-L110`
+- **源码**：`tools/demo.py` + `app_core.py#L104-L117`
 - **调用示例**：`{"name": "get_weather", "arguments": {"city": "北京"}}`
 
 ### calculator
@@ -39,7 +40,7 @@
   | `expression` | string | ✅ | 数学表达式，如 `3+5*2`、`2**10`、`(15+27)*3` |
 - **风险等级**：read
 - **安全机制**：`ast.parse()` + 白名单节点（`BinOp` / `Constant` / `UnaryOp`），拒绝 `Call` / `Name` / `Attribute`，指数绝对值 > 1000 额外防护
-- **源码**：`tools/demo.py` + `app_core.py#L115-L125`
+- **源码**：`tools/demo.py` + `app_core.py#L118-L131`
 - **调用示例**：`{"name": "calculator", "arguments": {"expression": "(15+27)*3"}}`
 
 ### demo_stream_chat
@@ -50,7 +51,7 @@
   |------|------|------|------|
   | `topic` | string | ✅ | 对话主题 |
 - **风险等级**：read
-- **源码**：`app_core.py` 闭包（L493-L498）
+- **源码**：`app_core.py` 闭包（L564-L569）
 - **调用示例**：`{"name": "demo_stream_chat", "arguments": {"topic": "什么是 RAG"}}`
 
 ### demo_reasoning
@@ -61,7 +62,7 @@
   |------|------|------|------|
   | `question` | string | ✅ | 需要推理的问题 |
 - **风险等级**：read
-- **源码**：`app_core.py` 闭包（L500-L501）
+- **源码**：`app_core.py` 闭包（L571-L572）
 
 ### demo_native_reasoning
 
@@ -71,7 +72,7 @@
   |------|------|------|------|
   | `question` | string | ✅ | 需要推理的问题 |
 - **风险等级**：read
-- **源码**：`app_core.py` 闭包（L503-L504）
+- **源码**：`app_core.py` 闭包（L574-L575）
 
 ### demo_react
 
@@ -82,7 +83,7 @@
   | `question` | string | ✅ | 需要 ReAct 推理的问题 |
 - **风险等级**：read
 - **特殊**：内部执行时调用 `clean_react_tool_map()` 剔除内部演示工具（防止 ReAct 自递归）
-- **源码**：`app_core.py` 闭包（L506-L512）+ `client.chat_with_react()`
+- **源码**：`app_core.py` 闭包（L577-L583）+ `client.chat_with_react()`
 
 ### demo_code_run
 
@@ -93,7 +94,7 @@
   | `code` | string | ✅ | 要执行的 Python 代码 |
   | `timeout` | integer | ❌ | 超时秒数，默认 10 |
 - **风险等级**：execute（ToolPolicy 拦截）
-- **源码**：`tools/system.py` + `app_core.py#L314`
+- **源码**：`tools/system.py` + `app_core.py#L317-L328`
 
 ### demo_few_shot
 
@@ -104,7 +105,7 @@
   | `question` | string | ✅ | 待处理文本 |
   | `task_type` | string | ❌ | 任务类型，默认 `sentiment`，可选 `sentiment` / `classification` / `extraction` |
 - **风险等级**：read
-- **源码**：`app_core.py` 闭包（L535-L555）
+- **源码**：`app_core.py` 闭包（L606-L625）
 
 ### reflexion_answer
 
@@ -114,7 +115,7 @@
   |------|------|------|------|
   | `question` | string | ✅ | 需要反思回答的问题 |
 - **风险等级**：read
-- **源码**：`app_core.py` 闭包（L523-L527）+ `client.chat_with_reflexion()`
+- **源码**：`app_core.py` 闭包（L591-L592）+ `client.chat_with_reflexion()`
 
 ### demo_vision
 
@@ -124,9 +125,9 @@
   |------|------|------|------|
   | `image_path` | string | ❌ | 图片路径，默认 `_test_chart.png` |
   | `question` | string | ❌ | 关于图片的问题 |
-- **风险等级**：read
+- **风险等级**：network（图像理解需调用多模态接口）
 - **前置条件**：模型需支持 vision（多模态）；默认工作区有 Pillow 生成的测试图
-- **源码**：`app_core.py` 闭包（L529-L534）+ `client.analyze_image()`
+- **源码**：`app_core.py` 闭包（L594-L598）+ `client.analyze_image()`
 
 ---
 
@@ -142,7 +143,7 @@
   | `max_chars` | integer | ❌ | 最多读取字符数，默认 3000 |
 - **风险等级**：read
 - **安全机制**：路径需在 `AGENT_WORKSPACE_ROOT` 内；超长内容会被截断
-- **源码**：`tools/fs.py`（workspace_root 绑定在 `build_tool_map()` 闭包中）+ `app_core.py#L144-L152`
+- **源码**：`tools/fs.py`（workspace_root 绑定在 `build_tool_map()` 闭包中）+ `app_core.py#L147-L161`
 
 ### file_write
 
@@ -155,7 +156,7 @@
   | `mode` | string | ❌ | 写入模式，默认 `write`，可选 `write` / `append` |
 - **风险等级**：write
 - **安全机制**：路径需在 `AGENT_WORKSPACE_ROOT` 内；ToolPolicy 可全局禁用 write
-- **源码**：`tools/fs.py` + `app_core.py#L159-L172`
+- **源码**：`tools/fs.py` + `app_core.py#L162-L181`
 
 ---
 
@@ -168,9 +169,9 @@
   | 字段 | 类型 | 必填 | 说明 |
   |------|------|------|------|
   | `query` | string | ✅ | 搜索关键词 |
-- **风险等级**：read
+- **风险等级**：network（ToolPolicy 五级分类中的网络类，Web 模式 `disable_dangerous` 时禁用）
 - **降级**：博查不可用时自动 DuckDuckGo，返回真实搜索结果
-- **源码**：`tools/search.py` + `app_core.py#L129-L143`
+- **源码**：`tools/search.py` + `app_core.py#L132-L146`
 
 ### search_knowledge
 
@@ -181,7 +182,7 @@
   | `query` | string | ✅ | 知识库查询（自然语言） |
 - **风险等级**：read
 - **前置条件**：RAG 已初始化（`--no-rag` 评测时不存在此工具）
-- **源码**：`app_core.py` 闭包（L514-L519）+ `rag.py` RAGKnowledgeBase.search()
+- **源码**：`app_core.py` 闭包（L585-L589）+ `rag.py` RAGKnowledgeBase.search()
 
 ---
 
@@ -198,7 +199,7 @@
   | `demo_seed` | boolean | ❌ | 是否首次调用时建表演示数据，默认 true |
 - **风险等级**：write（但内部物理只读，实际 execute 类拦截）
 - **安全机制**：SQLite URI `mode=ro` + `PRAGMA query_only=ON` 双重只读，DDL/DML 在引擎层被拒绝
-- **源码**：`tools/sql.py` + `app_core.py#L179-L200`
+- **源码**：`tools/sql.py` + `app_core.py#L182-L203`
 
 ---
 
@@ -215,7 +216,7 @@
   | `allow_unsafe` | boolean | ❌ | 自动注入为 True（ToolExecutor 判定 execute 风险后） |
 - **风险等级**：execute
 - **安全机制**：关键词黑名单（~40 条危险模式如 `Remove-Item -Recurse -Force`）；CLI 默认禁用，需 `--enable-dangerous-tools`
-- **源码**：`tools/system.py` + `app_core.py#L201-L218`
+- **源码**：`tools/system.py` + `app_core.py#L204-L221`
 
 ### run_code（demo_code_run）
 
@@ -241,7 +242,7 @@
   |------|------|------|------|
   | `task` | string | ✅ | 要拆解的复杂任务描述 |
 - **风险等级**：read
-- **源码**：`app_core.py` 闭包（L529-L530）+ `client.plan_and_execute()`
+- **源码**：`app_core.py` 闭包（L600-L601）+ `client.plan_and_execute()`
 
 ### extract_structured
 
@@ -252,7 +253,7 @@
   | `text` | string | ✅ | 原始文本 |
   | `fields` | string | ✅ | 要提取的字段列表，JSON 字符串如 `{"name": "string", "age": "integer"}` |
 - **风险等级**：read
-- **源码**：`app_core.py` 闭包（L532-L533）+ `client.structured_extract()`
+- **源码**：`app_core.py` 闭包（L603-L604）+ `client.structured_extract()`
 
 ### run_multi_agent
 
@@ -262,7 +263,7 @@
   |------|------|------|------|
   | `task` | string | ✅ | 整体任务描述 |
 - **风险等级**：read
-- **源码**：`app_core.py` 闭包（L556-L570）+ `multi_agent.run_multi_agent()`
+- **源码**：`app_core.py` 闭包（L627-L628）+ `multi_agent.run_multi_agent()`
 
 ### human_confirm
 
@@ -272,8 +273,30 @@
   |------|------|------|------|
   | `action` | string | ✅ | 描述即将执行的操作（展示给用户） |
 - **风险等级**：read
-- **实现差异**：CLI 用 `input()` 同步阻塞；Web UI 用 Gradio queue + 事件回调暂停执行
-- **源码**：`tools/system.py`（human_confirm CLI）+ `web_ui.py`（_web_human_confirm）+ `app_core.py#L219-L231`
+- **实现差异**：CLI 用 `input()` 同步阻塞等待用户确认；Web UI 端 `_web_human_confirm` 直接返回固定拒绝文案（"Web 模式不允许模型自行批准敏感操作"），敏感操作由 ToolPolicy 兜底禁用
+- **源码**：`tools/system.py`（human_confirm CLI）+ `web_ui.py#L222-L224`（_web_human_confirm）+ `app_core.py#L222-L235`
+
+---
+
+## 博客发布（1）
+
+### wp_publish
+
+- **描述**：把 Markdown 文件或 HTML 内容发布到 WordPress 博客（自动解析 Front Matter + Markdown→HTML + 分类/标签推断）
+- **参数**：
+  | 字段 | 类型 | 必填 | 说明 |
+  |------|------|------|------|
+  | `md_file` | string | ❌ | 本地 Markdown 文件路径（推荐方式） |
+  | `title` | string | ❌ | 文章标题（md_file 模式下自动提取） |
+  | `content_html` | string | ❌ | 文章正文（HTML 格式） |
+  | `status` | string | ❌ | 发布状态，默认 `draft`，可选 `draft` / `publish` / `pending` / `private` / `future` |
+  | `categories` | array | ❌ | 分类名列表（不存在会自动创建） |
+  | `tags` | array | ❌ | 标签名列表（不存在会自动创建） |
+  | `excerpt` | string | ❌ | 文章摘要（不填自动生成） |
+- **风险等级**：network（ToolPolicy 独立分类，Web 模式 `disable_dangerous` 时禁用）
+- **安全机制**：默认 `draft` 草稿状态，用户明确说"直接发布"才用 `publish`
+- **前置条件**：需配置 WordPress 站点凭据（见 Config 配置参考）
+- **源码**：`tools/wordpress.py` + `app_core.py#L406-L449`
 
 ---
 
@@ -283,7 +306,7 @@
 
 - **描述**：长对话自动摘要压缩（history 总字符超 5000 时触发，保留最近 4 条 + LLM 摘要）
 - **参数**：无（执行时自动调用）
-- **注册条件**：`build_tool_map()` 传入了 `get_history` / `set_history` 访问器时才注册
+- **注册条件**：schema 固定在 `TOOL_SCHEMAS` 中（`app_core.py#L258-L268`）；可调用闭包仅在 `build_tool_map()` 传入了 `get_history` / `set_history` 访问器时才注册进 tool_map（`app_core.py#L517-L519`）
 - **风险等级**：read
 - **源码**：`app_core.py` `make_summarize_history()`
 
@@ -303,7 +326,7 @@ MCPManager 连接的远端服务器上的工具会自动追加到 tool_map：
 
 ```bash
 python -c "from ai_agent.app_core import TOOL_SCHEMAS; print(len(TOOL_SCHEMAS))"
-# 预期输出：21
+# 预期输出：22
 ```
 
-注意：`summarize_history` 和 MCP 工具**不在** TOOL_SCHEMAS 里（条件注册 / 动态追加），实际可用工具数 = 21（基础）+ MCP（动态）+ summarize_history（条件）。
+注意：MCP 工具**不在** TOOL_SCHEMAS 里（运行时动态追加）；`summarize_history` 的 schema 在 TOOL_SCHEMAS 里，但可调用闭包是条件注册的。实际可用工具数 = 22（本地 schema）+ MCP（动态）。
