@@ -10,6 +10,7 @@
 |------|------|---------|
 | [设计决策清单.md](./设计决策清单.md) | 34 条设计决策，按架构/安全/RAG/Skill/集成/体验/评测 7 类组织，每条含代码片段、权衡分析、演进方向 | 新增/修改设计时同步更新 |
 | [Skill实现本质原理.md](./Skill实现本质原理.md) | 以本项目为实例，拆解 Skill 的声明式定义、关键词路由、Prompt 替换、工具集收窄等核心机制 | Skill 机制变更时更新 |
+| [深度理解agent模式选择.md](./深度理解agent模式选择.md) | FC/ReAct 协议对比、reasoning_content 折中、多 Agent 正交性、模型能力门槛、三模式对比实验与选择策略 | Agent 循环/协议实现变更时更新 |
 | [ai-agent-learning-roadmap.html](./ai-agent-learning-roadmap.html) | 学习路线图（HTML 独立文件，保留原样） | 阶段性里程碑时更新 |
 
 ---
