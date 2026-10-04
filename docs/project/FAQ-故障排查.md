@@ -70,8 +70,8 @@
 | 项 | 内容 |
 |----|------|
 | 现象 | 长对话后 history 越来越长，没有自动摘要 |
-| 原因 | `summarize_history` 工具只有在 `build_tool_map()` 传了 `get_history` / `set_history` 才注册；Web UI 的 history 由 Gradio State 管理，没传 |
-| 解决 | CLI 端传了，正常触发（阈值 5000 字符）；Web UI 可忽略（Gradio State 本身有长度限制） |
+| 原因 | `summarize_history` 工具只有在 `build_tool_map()` 传了 `get_history` / `set_history` 才注册 |
+| 解决 | CLI 与 Web UI 都通过 `AgentServices.build_tool_map()` 传了访问器，均可正常触发（阈值 5000 字符，由 `HISTORY_MAX_CHARS` 配置） |
 | 频率 | ⭐ |
 
 ---

@@ -1,11 +1,11 @@
 """
-本地 AI Agent 交互式演示 — 主入口
-================================
+本地 AI Agent 交互式演示 — CLI 主入口
+====================================
 架构：
-  ai_agent/client.py   → LMStudioClient（与 LM Studio API 直接交互）
-  ai_agent/rag.py      → RAGKnowledgeBase（PDF/MD/TXT 向量化检索）
-  ai_agent/tools/      → 模块级工具函数（schema 统一在 app_core.TOOL_SCHEMAS）
-  main.py              → AgentDemoApp（初始化 + 工具注册 + 交互循环）
+  ai_agent/bootstrap.py        → AgentServices（client/RAG/MCP/Skill/tool_map 共享装配）
+  ai_agent/session_service.py  → SessionService（会话业务规则，与 Web UI 共用）
+  ai_agent/app_core.py         → 提示词 / 工具 schema / 执行器工厂（单一真相源）
+  main.py                      → AgentDemoApp（CLI I/O 薄壳 + 交互循环）
 
 运行：python main.py  或  python -m ai_agent
 依赖：pip install requests openai pypdf pillow python-dotenv
@@ -17,8 +17,6 @@ import logging
 import os
 import time
 
-import requests
-
 from ai_agent.app_core import (
     SYSTEM_PROMPT as _CORE_SYSTEM_PROMPT,
 )
@@ -27,17 +25,16 @@ from ai_agent.app_core import (
     TOOL_SCHEMAS,
     build_system_prompt,
     build_tool_executor,
-    build_tool_map,
-    compress_and_persist_history,
     ensure_test_image,
     filter_tool_schemas,
+    get_tool_schemas,
 )
+from ai_agent.bootstrap import AgentServices, resolve_dangerous_tools
 from ai_agent.cli_trace import CallRecorder, get_console, render_calls
-from ai_agent.client import LMStudioClient
 from ai_agent.config import Config, load_env
 from ai_agent.console import configure_utf8_output
 from ai_agent.persistence import DEFAULT_DB_PATH, ChatStore
-from ai_agent.rag import RAGKnowledgeBase, collect_rag_files
+from ai_agent.session_service import SessionService
 
 # ---------- 加载 .env 环境变量（幂等；未安装 python-dotenv 时静默跳过） ----------
 load_env()
@@ -60,12 +57,6 @@ configure_utf8_output()
 class AgentDemoApp:
     """交互式 Agent 演示应用：初始化环境、注册工具并运行自然语言交互循环。"""
 
-    # RAG 知识库扫描目录：这些目录下的 .md / .txt / .pdf 文件会被递归扫描
-    # 不存在的目录会被跳过。也可通过 Config.rag_directories 覆盖。
-    RAG_DIRECTORIES = [
-        "docs/knowledge",
-        "data",
-    ]
     TEST_IMAGE = "_test_chart.png"
     EXIT_WORDS = ("exit", "quit", "q", "退出")
 
@@ -78,30 +69,30 @@ class AgentDemoApp:
         db_path: str = DEFAULT_DB_PATH,
         enable_dangerous_tools: bool | None = None,
     ):
-        self.cfg = Config.from_env()
-        self.project_root = os.path.abspath(self.cfg.project_root)
-        self.workspace_root = os.path.abspath(self.cfg.workspace_root)
-        self.enable_dangerous_tools = (
-            self.cfg.enable_dangerous_tools if enable_dangerous_tools is None else enable_dangerous_tools
+        self.services = AgentServices(Config.from_env())
+        self.cfg = self.services.cfg
+        self.project_root = self.services.project_root
+        self.workspace_root = self.services.workspace_root
+        # 危险工具开关：CLI flag 显式覆盖 > ENABLE_DANGEROUS_TOOLS 配置
+        self.enable_dangerous_tools = resolve_dangerous_tools(
+            self.cfg, cli_flag=enable_dangerous_tools
         )
-        self.client = LMStudioClient(
-            self.cfg.base_url,
-            self.cfg.api_key,
-            self.cfg.model,
-            timeout=self.cfg.request_timeout,
-        )
+        self.client = self.services.client
         # 收集每轮的 LLM API 调用快照：回复后打印摘要，/calls 查看完整输入输出
         self.llm_recorder = CallRecorder()
         self.client.on_llm_call = self.llm_recorder
         self.show_llm_summary = True
-        self.rag: RAGKnowledgeBase | None = None
         self.tool_map: dict = {}
         self.tool_executor = None
-        self.skill_registry = None  # 可选 SkillRegistry（运行时扫描 skills/ 目录）
         self.history: list[dict] = []
         # ---------- 对话持久化 ----------
         self.store = ChatStore(db_path)
+        self.sessions = SessionService(self.store)
         self.session_id: str | None = None
+
+    @property
+    def skill_registry(self):
+        return self.services.skill_registry
 
     # ---------- 初始化步骤 ----------
 
@@ -118,51 +109,16 @@ class AgentDemoApp:
             print(f"  错误: {status['error']}")
         print("=" * 50)
 
-    def _build_knowledge_base(self) -> None:
-        """构建 RAG 知识库索引（首次向量化较慢，之后走缓存）"""
-        print("\n构建 RAG 知识库索引（首次需向量化全部片段，可能较慢）...")
-        try:
-            self.rag = RAGKnowledgeBase(
-                base_url=self.cfg.base_url,
-                embed_model=self.cfg.embed_model,
-                chunk_size=self.cfg.chunk_size,
-                chunk_overlap=self.cfg.chunk_overlap,
-                cache_file=(
-                    self.cfg.rag_cache_file
-                    if os.path.isabs(self.cfg.rag_cache_file)
-                    else os.path.join(self.project_root, self.cfg.rag_cache_file)
-                ),
-                request_timeout=self.cfg.request_timeout,
-            )
-            # 扫描目录下的全部 .md / .txt / .pdf 文件
-            rag_dirs = list(self.cfg.rag_directories) if self.cfg.rag_directories else self.RAG_DIRECTORIES
-            rag_paths = collect_rag_files(self.project_root, rag_dirs)
-            if rag_paths:
-                n_chunks = self.rag.build(rag_paths)
-                print(f"[OK] 知识库就绪：{len(rag_paths)} 个文件 → {n_chunks} 个文本片段")
-            else:
-                print("[WARN] RAG 扫描目录为空或不存在，跳过初始化")
-                self.rag = None
-        except (requests.RequestException, RuntimeError, OSError, ValueError, KeyError) as e:
-            log.warning("RAG 初始化失败: %s", e)
-            print(f"[WARN] RAG 初始化失败（{e}），知识库问答将不可用")
-            self.rag = None
-
     def _create_test_image(self) -> None:
         """用 Pillow 生成一张测试图表，供图像识别演示（已存在则跳过）"""
-        image_path = os.path.join(self.project_root, self.TEST_IMAGE)
-        if ensure_test_image(image_path):
-            print(f"[OK] 已生成测试图片 {image_path} 供图像识别演示")
+        if ensure_test_image(self.services.test_image):
+            print(f"[OK] 已生成测试图片 {self.TEST_IMAGE} 供图像识别演示")
 
     def _register_tools(self) -> None:
-        """注册演示工具（统一调用 app_core.build_tool_map 构建工具映射）"""
-        self.tool_map = build_tool_map(
-            self.client,
-            lambda: self.rag,
-            os.path.join(self.project_root, self.TEST_IMAGE),
+        """注册演示工具（tool_map 与 Skill 由共享的 AgentServices 装配）"""
+        self.tool_map = self.services.build_tool_map(
             get_history=lambda: self.history,
             set_history=lambda h: setattr(self, "history", h),
-            workspace_root=self.workspace_root,
         )
         self.tool_executor = build_tool_executor(
             self.tool_map,
@@ -198,17 +154,6 @@ class AgentDemoApp:
         elif event.kind == "error" and event.payload.get("iteration"):
             print(f"[Agent Event] {event.payload['message']}")
 
-    def _register_skills(self) -> None:
-        """加载声明式 Skill（可选，skills/ 目录不存在则跳过）"""
-        skill_dir = self.cfg.skill_dir
-        if not skill_dir:
-            return
-        from ai_agent.skill import create_skill_registry
-
-        # 解析为相对 main.py 所在目录的绝对路径
-        abs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), skill_dir)
-        self.skill_registry = create_skill_registry(abs_dir, list(self.tool_map.keys()))
-
     def _print_banner(self) -> None:
         """打印启动 banner 与示例"""
         print()
@@ -237,10 +182,10 @@ class AgentDemoApp:
     def run(self) -> None:
         """启动交互式 Agent 演示"""
         self.check_server()
-        self._build_knowledge_base()
+        print("\n构建 RAG 知识库索引（首次需向量化全部片段，可能较慢）...")
+        self.services.ensure_rag()
         self._create_test_image()
         self._register_tools()
-        self._register_skills()  # ← 新增：加载声明式 Skill（可选）
         self._print_banner()
 
         # 用动态 system prompt（包含 Skill 列表简述）
@@ -272,12 +217,9 @@ class AgentDemoApp:
                 break
 
             self.history.append({"role": "user", "content": user_input})
-            # 持久化用户消息
+            # 持久化用户消息（首条自动生成标题）
             if self.session_id:
-                self.store.append(self.session_id, "user", user_input)
-                # 自动生成标题（首条用户消息）
-                if self.store.count_messages(self.session_id) <= 1:
-                    self.store.auto_title(self.session_id, user_input)
+                self.sessions.append_user_message(self.session_id, user_input)
 
             try:
                 print("\n助手> ", end="", flush=True)
@@ -285,9 +227,12 @@ class AgentDemoApp:
                 self.llm_recorder.reset()
                 reply = self.client.chat_with_tools(
                     messages=self.history,
-                    tools=filter_tool_schemas(self.TOOLS, self.tool_executor.policy),
+                    tools=filter_tool_schemas(
+                        get_tool_schemas(self.services.mcp_manager),
+                        self.tool_executor.policy,
+                    ),
                     tool_map=self.tool_map,
-                    skill_registry=self.skill_registry,  # ← 新增：让 Skill 路由生效
+                    skill_registry=self.skill_registry,
                     tool_executor=self.tool_executor,
                     on_event=self._on_agent_event,
                     session_id=self.session_id,
@@ -301,20 +246,20 @@ class AgentDemoApp:
                 self.history.append({"role": "assistant", "content": reply})
                 # 持久化助手回复
                 if self.session_id:
-                    self.store.append(self.session_id, "assistant", reply)
+                    self.sessions.append_assistant_message(self.session_id, reply)
 
                 # ===== 长对话自动摘要压缩 =====
-                total_chars = sum(len(m.get("content") or "") for m in self.history)
-                if total_chars > self.cfg.history_max_chars:
-                    print(
-                        f"\n[系统] 对话历史已达 {total_chars} 字符"
-                        f"（阈值 {self.cfg.history_max_chars}），自动压缩中..."
-                    )
-                    self.history = compress_and_persist_history(
-                        self.client, self.history, self.store, self.session_id
-                    )
+                compressed_history, before, compressed = self.sessions.compress_if_needed(
+                    self.client, self.history, self.session_id, self.cfg.history_max_chars
+                )
+                if compressed:
+                    self.history = compressed_history
                     now_chars = sum(len(m.get("content") or "") for m in self.history)
-                    print(f"[系统] 压缩完成，剩余 {now_chars} 字符（保留最近 4 条完整消息）")
+                    print(
+                        f"\n[系统] 对话历史已达 {before} 字符"
+                        f"（阈值 {self.cfg.history_max_chars}），"
+                        f"已自动压缩为 {now_chars} 字符（保留最近 4 条完整消息）"
+                    )
             except RuntimeError as e:
                 print(f"[ERROR] {e}")
                 self.history.pop()
@@ -326,12 +271,12 @@ class AgentDemoApp:
 
     def _handle_session_select(self) -> None:
         """启动时显示会话列表让用户选择，或创建新会话"""
-        sessions = self.store.list_sessions(limit=10)
+        sessions = self.sessions.list(limit=10)
         if sessions:
             print(f"\n📁 已保存 {len(sessions)} 个历史会话：")
             for i, s in enumerate(sessions, 1):
                 mode_tag = f"[{s.mode}]" if s.mode != "chat" else ""
-                print(f"   {i}. {s.title} {mode_tag} ({self.store.count_messages(s.id)} 条消息)")
+                print(f"   {i}. {s.title} {mode_tag} ({self.sessions.count_messages(s.id)} 条消息)")
             print("   n. 新建会话")
 
             while True:
@@ -342,12 +287,13 @@ class AgentDemoApp:
                     idx = int(choice) - 1
                     if 0 <= idx < len(sessions):
                         sid = sessions[idx].id
-                        saved = self.store.load_messages(sid)
-                        print(f"\n✅ 已恢复会话「{sessions[idx].title}」（{len(saved)} 条历史消息）")
-                        # 恢复时把 system prompt + 历史消息拼回去
-                        self.history = [
-                            {"role": "system", "content": build_system_prompt(self.skill_registry)}
-                        ] + saved
+                        self.history = self.sessions.restore_history(
+                            sid, build_system_prompt(self.skill_registry)
+                        )
+                        print(
+                            f"\n✅ 已恢复会话「{sessions[idx].title}」"
+                            f"（{len(self.history) - 1} 条历史消息）"
+                        )
                         self.session_id = sid
                         return
                 except ValueError:
@@ -355,7 +301,7 @@ class AgentDemoApp:
                 print("   输入无效，请重试")
 
         # 创建新会话
-        sid = self.store.create_session(title="新会话", mode="chat")
+        sid = self.sessions.create(mode="chat")
         self.session_id = sid
         print(f"\n✨ 已创建新会话（ID: {sid}）")
         print("   提示：输入 /sessions 管理历史，输入 /save 手动保存当前标题")
@@ -426,7 +372,7 @@ class AgentDemoApp:
         return ""
 
     def _cmd_sessions(self, arg: str) -> str:
-        sessions = self.store.list_sessions(limit=20)
+        sessions = self.sessions.list(limit=20)
         if not sessions:
             print("  暂无历史会话")
         else:
@@ -434,11 +380,14 @@ class AgentDemoApp:
             for i, s in enumerate(sessions, 1):
                 cur_tag = " ← 当前" if s.id == self.session_id else ""
                 mode_tag = f"[{s.mode}]" if s.mode != "chat" else ""
-                print(f"   {i}. {s.title} {mode_tag} ({self.store.count_messages(s.id)} 条){cur_tag}")
+                print(
+                    f"   {i}. {s.title} {mode_tag} "
+                    f"({self.sessions.count_messages(s.id)} 条){cur_tag}"
+                )
         return ""
 
     def _cmd_load(self, arg: str) -> str:
-        sessions = self.store.list_sessions(limit=20)
+        sessions = self.sessions.list(limit=20)
         if not sessions:
             print("  暂无历史会话")
             return ""
@@ -446,12 +395,11 @@ class AgentDemoApp:
             idx = int(arg) - 1
             if 0 <= idx < len(sessions):
                 sid = sessions[idx].id
-                saved = self.store.load_messages(sid)
-                print(f"  ✅ 已加载「{sessions[idx].title}」（{len(saved)} 条消息）")
-                self.history = [
-                    {"role": "system", "content": build_system_prompt(self.skill_registry)}
-                ] + saved
+                self.history = self.sessions.restore_history(
+                    sid, build_system_prompt(self.skill_registry)
+                )
                 self.session_id = sid
+                print(f"  ✅ 已加载「{sessions[idx].title}」（{len(self.history) - 1} 条消息）")
                 return ""
         except ValueError:
             pass
@@ -459,7 +407,7 @@ class AgentDemoApp:
         return ""
 
     def _cmd_new(self, arg: str) -> str:
-        sid = self.store.create_session(title="新会话", mode="chat")
+        sid = self.sessions.create(mode="chat")
         self.session_id = sid
         self.history = [{"role": "system", "content": build_system_prompt(self.skill_registry)}]
         print(f"  ✨ 已创建新会话（ID: {sid}）")
@@ -469,8 +417,8 @@ class AgentDemoApp:
         if not self.session_id:
             print("  当前无活动会话")
             return ""
-        title = arg or self.store.get_session(self.session_id).title
-        self.store.rename_session(self.session_id, title)
+        title = arg or self.sessions.get(self.session_id).title
+        self.sessions.rename(self.session_id, title)
         print(f"  💾 已保存为「{title}」")
         return ""
 
@@ -481,19 +429,19 @@ class AgentDemoApp:
         if not arg:
             print("  用法: /rename <新标题>")
             return ""
-        self.store.rename_session(self.session_id, arg)
+        self.sessions.rename(self.session_id, arg)
         print(f"  ✏️ 已重命名为「{arg}」")
         return ""
 
     def _cmd_delete(self, arg: str) -> str:
-        sessions = self.store.list_sessions(limit=20)
+        sessions = self.sessions.list(limit=20)
         try:
             idx = int(arg) - 1
             if 0 <= idx < len(sessions):
                 sid = sessions[idx].id
                 confirm = input(f"  确认删除「{sessions[idx].title}」？(y/N): ").strip().lower()
                 if confirm == "y":
-                    self.store.delete_session(sid)
+                    self.sessions.delete(sid)
                     if sid == self.session_id:
                         self.session_id = None
                         self.history = [
@@ -510,7 +458,7 @@ class AgentDemoApp:
 
     def _cmd_clear(self, arg: str) -> str:
         if self.session_id:
-            self.store.clear_messages(self.session_id)
+            self.sessions.clear(self.session_id)
             print("  🧹 已清空当前会话的消息历史（会话本身保留）")
         else:
             print("  当前无活动会话")
@@ -518,9 +466,9 @@ class AgentDemoApp:
 
     def _cmd_current(self, arg: str) -> str:
         if self.session_id:
-            s = self.store.get_session(self.session_id)
+            s = self.sessions.get(self.session_id)
             print(f"  当前会话: {s.title} [{s.mode}]")
-            print(f"  消息数: {self.store.count_messages(self.session_id)}")
+            print(f"  消息数: {self.sessions.count_messages(self.session_id)}")
         else:
             print("  当前无活动会话")
         return ""

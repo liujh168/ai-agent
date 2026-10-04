@@ -34,6 +34,8 @@ AgentRuntime.run()
 - `ai_agent/events.py`：`AgentEvent` 事件类型
 - `ai_agent/tooling.py`：`ToolPolicy`、`ToolExecutor`
 - `ai_agent/app_core.py`：提示词、工具 schema、工具注册（单一真相源）
+- `ai_agent/bootstrap.py`：CLI / Web 共享的服务装配（client / RAG / MCP / Skill / tool_map）
+- `ai_agent/session_service.py`：CLI / Web 共享的会话业务规则（自动命名、恢复、压缩阈值）
 - `ai_agent/persistence.py`：线程安全的 SQLite 会话存储
 - `ai_agent/web_ui.py`：按浏览器隔离状态的 Gradio UI
 - `ai_agent/client.py`：LM Studio 客户端 + 高级 Agent 模式（所有 API 调用经 `_create_completion` 收口）
@@ -197,6 +199,8 @@ python -m ai_agent.eval --enable-dangerous-tools
 ```text
 ai_agent/
   app_core.py       # 提示词、工具 schema、注册与策略工厂（单一真相源）
+  bootstrap.py      # CLI / Web 共享的服务装配（client / RAG / MCP / Skill / tool_map）
+  session_service.py # CLI / Web 共享的会话业务规则（自动命名 / 恢复 / 压缩阈值）
   client.py         # LM Studio 客户端（演示算法薄委托，实现在 demos/）
   demos/            # 演示算法包：ReAct / 思维链 / 原生推理 / 反思 / 规划 / 结构化提取
   runtime.py        # 统一事件式工具循环（CLI / Web UI 共用）

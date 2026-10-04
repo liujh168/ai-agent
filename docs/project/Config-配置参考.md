@@ -128,10 +128,10 @@ WP_APP_PASSWORD=admin abc1 def2 ghi3 jkl4
 
 | 参数 | 说明 | 默认 |
 |------|------|------|
-| `--db DB_PATH` | SQLite 数据库路径（会话持久化） | `agent_sessions.db` |
-| `--enable-dangerous-tools` | 显式启用 `run_terminal` / `run_code` | `false` |
+| `--enable-dangerous-tools` | 显式启用 `run_terminal` / `run_code` | 不传则用 `ENABLE_DANGEROUS_TOOLS` 配置 |
 
-> CLI 启动时 `agent_dangerous = cli_flag or cfg.enable_dangerous_tools`，只要有一个为 True 就启用。
+> 危险工具开关统一由 `ai_agent/bootstrap.py` 的 `resolve_dangerous_tools()` 裁决，优先级：
+> 强制禁用（如 Web `--share`）> CLI flag 显式传入 > `Config.enable_dangerous_tools`。
 
 ---
 

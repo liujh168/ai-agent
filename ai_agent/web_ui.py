@@ -26,18 +26,16 @@ from ai_agent.app_core import (
     TOOL_COUNT,
     build_system_prompt,
     build_tool_executor,
-    build_tool_map,
     clean_react_tool_map,
-    compress_and_persist_history,
     filter_tool_schemas,
     get_tool_schemas,
 )
-from ai_agent.client import LMStudioClient
+from ai_agent.bootstrap import AgentServices
 from ai_agent.config import Config, load_env
 from ai_agent.llm_trace import LLMCall
 from ai_agent.multi_agent import run_multi_agent
 from ai_agent.persistence import DEFAULT_DB_PATH, ChatStore
-from ai_agent.rag import RAGKnowledgeBase, collect_rag_files
+from ai_agent.session_service import SessionService
 
 load_env()
 
@@ -121,28 +119,30 @@ class AgentApp:
     """Shared services plus per-request state passed through Gradio State."""
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH, disable_dangerous: bool = False):
-        self.cfg = Config.from_env()
-        self.project_root = os.path.abspath(self.cfg.project_root)
-        self.workspace_root = os.path.abspath(self.cfg.workspace_root)
-        self.client = LMStudioClient(
-            self.cfg.base_url,
-            self.cfg.api_key,
-            self.cfg.model,
-            timeout=self.cfg.request_timeout,
-        )
+        self.services = AgentServices(Config.from_env())
+        self.cfg = self.services.cfg
+        self.project_root = self.services.project_root
+        self.workspace_root = self.services.workspace_root
+        self.client = self.services.client
         # 把每次 LLM API 调用的输入输出接到 Web 面板上
         self.client.on_llm_call = self._on_llm_call
         self.store = ChatStore(db_path)
-        self.rag: RAGKnowledgeBase | None = None
-        self._rag_lock = threading.Lock()
-        self.skill_registry = None
+        self.sessions = SessionService(self.store)
         self._state_local = threading.local()
-        self.test_image = os.path.join(self.project_root, "_test_chart.png")
+        # --share 公网分享时强制禁用写入、MCP 和外发网络工具
         self.disable_dangerous = disable_dangerous
+        self.mcp_manager = self.services.mcp_manager
         self.tool_map: dict = {}
-        self.mcp_manager = None
         self.tool_executor = None
         self._register_tools()
+
+    @property
+    def rag(self):
+        return self.services.rag
+
+    @property
+    def skill_registry(self):
+        return self.services.skill_registry
 
     def new_state(self, mode: str = "chat", session_id: str | None = None) -> SessionState:
         prompt = build_system_prompt(self.skill_registry)
@@ -192,18 +192,12 @@ class AgentApp:
         return params
 
     def _register_tools(self) -> None:
-        self.mcp_manager = self._init_mcp()
-        self.tool_map = build_tool_map(
-            self.client,
-            lambda: self.rag,
-            self.test_image,
+        """注册工具（tool_map / MCP / Skill 由共享的 AgentServices 装配），只保留 Web 侧策略"""
+        self.tool_map = self.services.build_tool_map(
             get_history=self._get_active_history,
             set_history=self._set_active_history,
-            mcp_manager=self.mcp_manager,
-            workspace_root=self.workspace_root,
         )
         self.tool_map["human_confirm"] = self._web_human_confirm
-        self._register_skills()
 
         allow_write = not self.disable_dangerous
         allow_mcp = bool(self.cfg.mcp_allowed_tools) and not self.disable_dangerous
@@ -225,59 +219,12 @@ class AgentApp:
     def _set_active_history(self, history) -> None:
         self._state_local.history = history
 
-    def _register_skills(self) -> None:
-        skill_dir = self.cfg.skill_dir
-        if not skill_dir:
-            return
-        from ai_agent.skill import create_skill_registry
-
-        abs_dir = os.path.join(self.project_root, skill_dir)
-        self.skill_registry = create_skill_registry(abs_dir, list(self.tool_map.keys()))
-
-    def _init_mcp(self):
-        try:
-            from ai_agent.mcp_client import create_mcp_manager
-
-            if not self.cfg.mcp_servers:
-                return None
-            return create_mcp_manager(list(self.cfg.mcp_servers))
-        except Exception as exc:
-            print(f"  ⚠️ MCP 初始化失败: {exc}")
-            return None
-
     @staticmethod
     def _web_human_confirm(action: str) -> str:
         return "⚠️ Web 模式不允许模型自行批准敏感操作。受限写操作只能写入配置的工作区，执行型工具始终禁用。"
 
     def is_mcp_tool(self, name: str) -> bool:
         return bool(self.mcp_manager and self.mcp_manager.is_mcp_tool(name))
-
-    def init_rag(self) -> None:
-        if self.rag is not None:
-            return
-        with self._rag_lock:
-            if self.rag is not None:
-                return
-            try:
-                self.rag = RAGKnowledgeBase(
-                    base_url=self.cfg.base_url,
-                    embed_model=self.cfg.embed_model,
-                    chunk_size=self.cfg.chunk_size,
-                    chunk_overlap=self.cfg.chunk_overlap,
-                    cache_file=os.path.join(self.project_root, self.cfg.rag_cache_file),
-                    request_timeout=self.cfg.request_timeout,
-                )
-                # 扫描 cfg.rag_directories 下的全部 .md / .txt / .pdf 文件
-                rag_paths = collect_rag_files(self.project_root, self.cfg.rag_directories)
-                if rag_paths:
-                    self.rag.build(rag_paths)
-                    print(f"RAG 已加载 {len(rag_paths)} 个文件，共 {len(self.rag.chunks)} 个 chunks")
-                else:
-                    self.rag = None
-                    print("RAG 扫描目录为空或不存在，跳过初始化")
-            except Exception as exc:
-                print(f"RAG 初始化失败: {exc}")
-                self.rag = None
 
     def trace(self, state: SessionState, text: str, kind: str = "info") -> None:
         trace_buffer = state.setdefault("trace_buffer", [])
@@ -689,12 +636,14 @@ class AgentApp:
         event_queue.put(("done", reply))
 
     def _maybe_compress(self, state: SessionState) -> None:
-        total_chars = sum(len(m.get("content") or "") for m in state["history"])
-        if total_chars <= self.cfg.history_max_chars:
-            return
-        state["history"] = compress_and_persist_history(
-            self.client, state["history"], self.store, state.get("session_id")
+        compressed, _, did_compress = self.sessions.compress_if_needed(
+            self.client,
+            state["history"],
+            state.get("session_id"),
+            self.cfg.history_max_chars,
         )
+        if did_compress:
+            state["history"] = compressed
 
     def send(self, user_text: str, history: list[dict], state: SessionState | None):
         state = self.ensure_state(state)
@@ -702,12 +651,9 @@ class AgentApp:
             yield self.trace_html(state), self.llm_panel_html(state), history or [], "", state
             return
 
-        self.init_rag()
+        self.services.ensure_rag()
         if state.get("session_id") is None:
-            state["session_id"] = self.store.create_session(
-                title="新会话",
-                mode=state.get("mode", "chat"),
-            )
+            state["session_id"] = self.sessions.create(mode=state.get("mode", "chat"))
 
         session_id = state["session_id"]
         state["trace_buffer"] = []
@@ -721,9 +667,7 @@ class AgentApp:
             state,
             f"📥 用户输入: {user_text[:100]}{'…' if len(user_text) > 100 else ''}",
         )
-        self.store.append(session_id, "user", user_text)
-        if self.store.count_messages(session_id) <= 1:
-            self.store.auto_title(session_id, user_text)
+        self.sessions.append_user_message(session_id, user_text)
         state["history"].append({"role": "user", "content": user_text})
 
         gradio_hist = list(history or []) + [{"role": "user", "content": user_text}]
@@ -796,7 +740,7 @@ class AgentApp:
             reply = result_holder["reply"] or "(无输出)"
 
         state["history"].append({"role": "assistant", "content": reply})
-        self.store.append(session_id, "assistant", reply)
+        self.sessions.append_assistant_message(session_id, reply)
         try:
             self._maybe_compress(state)
         except Exception as exc:
@@ -810,16 +754,16 @@ class AgentApp:
     def new_session(self, state: SessionState | None) -> tuple[str, str, list, SessionState]:
         state = self.ensure_state(state)
         mode = state.get("mode", "chat")
-        session_id = self.store.create_session(title="新会话", mode=mode)
+        session_id = self.sessions.create(mode=mode)
         state = self.new_state(mode=mode, session_id=session_id)
         self.trace(state, f"✨ 已创建新会话 {session_id}", "info")
         return self.trace_html(state), self.llm_panel_html(state), [], state
 
     def delete_all_sessions(self, state: SessionState | None) -> tuple[str, str, list, SessionState]:
         state = self.ensure_state(state)
-        deleted = self.store.delete_all_sessions()
+        deleted = self.sessions.delete_all()
         mode = state.get("mode", "chat")
-        session_id = self.store.create_session(title="新会话", mode=mode)
+        session_id = self.sessions.create(mode=mode)
         state = self.new_state(mode=mode, session_id=session_id)
         self.trace(state, f"🗑 已删除全部历史会话（{deleted} 个），并创建新会话 {session_id}", "info")
         return self.trace_html(state), self.llm_panel_html(state), [], state
@@ -829,10 +773,10 @@ class AgentApp:
     ) -> tuple[Any, Any, Any, SessionState, bool]:
         """删除单个会话；若删的是当前会话则自动切换到新会话（返回最后一项标记是否发生了切换）"""
         state = self.ensure_state(state)
-        session = self.store.get_session(session_id) if session_id else None
+        session = self.sessions.get(session_id)
         if session is None:
             return gr.update(), gr.update(), gr.update(), state, False
-        self.store.delete_session(session.id)
+        self.sessions.delete(session.id)
         if session.id == state.get("session_id"):
             trace, panel, history, new_state = self.new_session(state)
             return trace, panel, history, new_state, True
@@ -845,7 +789,7 @@ class AgentApp:
         state: SessionState | None,
     ) -> tuple[str, str, list[tuple], SessionState, Any]:
         state = self.ensure_state(state)
-        session = self.store.get_session(session_id) if session_id else None
+        session = self.sessions.get(session_id)
         if session is None:
             return (
                 self.trace_html(state),
@@ -854,9 +798,9 @@ class AgentApp:
                 state,
                 gr.update(),
             )
-        saved = self.store.load_messages(session.id)
         state = self.new_state(mode=session.mode, session_id=session.id)
-        state["history"].extend(saved)
+        state["history"] = self.sessions.restore_history(session.id, state["system_prompt"])
+        saved = state["history"][1:]
         self.trace(state, f"✅ 已恢复会话 {session.id}（{len(saved)} 条消息）", "info")
         gradio_hist = [
             {"role": message["role"], "content": message["content"]}
@@ -872,9 +816,13 @@ class AgentApp:
         )
 
     def list_sessions(self) -> list[tuple[str, str, str]]:
-        sessions = self.store.list_sessions(limit=20)
+        sessions = self.sessions.list(limit=20)
         return [
-            (session.id, session.title, f"[{session.mode}] {self.store.count_messages(session.id)}条")
+            (
+                session.id,
+                session.title,
+                f"[{session.mode}] {self.sessions.count_messages(session.id)}条",
+            )
             for session in sessions
         ]
 
@@ -882,7 +830,7 @@ class AgentApp:
         state = self.ensure_state(state)
         state["mode"] = mode
         if state.get("session_id"):
-            self.store.set_session_mode(state["session_id"], mode)
+            self.sessions.set_mode(state["session_id"], mode)
         self.trace(state, f"切换模式 → {mode}", "info")
         return self.trace_html(state), state
 
@@ -946,7 +894,7 @@ class AgentApp:
         state = self.ensure_state(state)
         session_id = state.get("session_id")
         if session_id:
-            self.store.clear_messages(session_id)
+            self.sessions.clear(session_id)
         mode = state.get("mode", "chat")
         prompt = state.get("system_prompt") or build_system_prompt(self.skill_registry)
         params = dict(state.get("params") or DEFAULT_RUN_PARAMS)
