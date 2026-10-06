@@ -205,9 +205,9 @@ def test_clear_llm_calls_resets_rounds():
 
 
 def test_highlight_json_escapes_and_colors():
-    from ai_agent.web_ui import _highlight_json
+    from ai_agent.web_render import highlight_json
 
-    highlighted = _highlight_json('{"key": "<b>", "n": 1, "ok": true}')
+    highlighted = highlight_json('{"key": "<b>", "n": 1, "ok": true}')
     assert '<span class="json-key">' in highlighted
     assert '<span class="json-num">1</span>' in highlighted
     assert '<span class="json-bool">true</span>' in highlighted

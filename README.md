@@ -37,7 +37,8 @@ AgentRuntime.run()
 - `ai_agent/bootstrap.py`：CLI / Web 共享的服务装配（client / RAG / MCP / Skill / tool_map）
 - `ai_agent/session_service.py`：CLI / Web 共享的会话业务规则（自动命名、恢复、压缩阈值）
 - `ai_agent/persistence.py`：线程安全的 SQLite 会话存储
-- `ai_agent/web_ui.py`：按浏览器隔离状态的 Gradio UI
+- `ai_agent/web_ui.py`：按浏览器隔离状态的 Gradio UI（状态装配与事件流）
+- `ai_agent/web_render.py`：Web 呈现层纯函数（LLM 调用检查器 / 执行轨迹 HTML、`SessionState` TypedDict）
 - `ai_agent/client.py`：LM Studio 客户端 + 高级 Agent 模式（所有 API 调用经 `_create_completion` 收口）
 - `ai_agent/llm_trace.py`：LLM 调用快照（输入消息/工具/参数、输出、用量、耗时，供双界面展示）
 - `ai_agent/cli_trace.py`：CLI 侧的调用摘要与 `/calls` 详情渲染（rich）
@@ -212,7 +213,9 @@ ai_agent/
   skill.py          # Skill 加载（Markdown Frontmatter）+ 关键词路由匹配
   mcp_client.py     # MCP Streamable HTTP 客户端（极简实现）
   multi_agent.py    # Planner / Executor / Critic 三角色协作
-  web_ui.py         # Gradio Web UI（per-browser State + threading.local）
+  web_ui.py         # Gradio Web UI（per-browser State + threading.local；渲染委托 web_render）
+  web_render.py     # Web 呈现层纯函数（LLM 调用面板 / 执行轨迹 HTML + SessionState TypedDict）
+  static/web_ui.css # Web UI 外置样式表（由 web_ui._load_css 读取）
   eval.py           # Gold Case 离线评测框架
   eval_report_template.html  # 评测 HTML 报告模板（string.Template 占位符）
   console.py        # Windows 控制台 UTF-8 适配

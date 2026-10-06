@@ -1,13 +1,14 @@
-"""Gradio Web UI with per-browser session state and typed Agent events."""
+"""Gradio Web UI with per-browser session state and typed Agent events.
+
+呈现层（LLM 调用面板 / 执行轨迹 / JSON 高亮的 HTML 渲染）已抽到 ai_agent/web_render.py，
+本模块只保留状态装配、事件流与 Gradio 界面接线。样式表外置在 ai_agent/static/web_ui.css。
+"""
 
 from __future__ import annotations
 
-import html
 import inspect
-import json
 import os
 import queue
-import re
 import sys
 import threading
 import time
@@ -21,7 +22,7 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ai_agent import llm_trace
+from ai_agent import web_render
 from ai_agent.app_core import (
     TOOL_COUNT,
     build_system_prompt,
@@ -36,14 +37,10 @@ from ai_agent.llm_trace import LLMCall
 from ai_agent.multi_agent import run_multi_agent
 from ai_agent.persistence import DEFAULT_DB_PATH, ChatStore
 from ai_agent.session_service import SessionService
+from ai_agent.web_render import COPY_BUTTON_HEAD, MAX_LLM_CALLS, SessionState
 
 load_env()
 
-
-SessionState = dict[str, Any]
-
-# 面板里保留的最近调用条数：跨轮保留历史，超长会话不至于让 DOM 无限膨胀
-MAX_LLM_CALLS = 120
 
 # 采样参数默认值（Kimi Playground 式可调参数）
 DEFAULT_RUN_PARAMS: dict[str, Any] = {
@@ -52,67 +49,13 @@ DEFAULT_RUN_PARAMS: dict[str, Any] = {
     "max_iterations": 5,
 }
 
-ROLE_LABEL = {
-    "system": "system · 系统提示词",
-    "user": "user · 用户输入",
-    "assistant": "assistant · 模型输出",
-    "tool": "tool · 工具返回",
-}
-ROLE_CLASS = {
-    "system": "role-system",
-    "user": "role-user",
-    "assistant": "role-assistant",
-    "tool": "role-tool",
-}
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
-def _copyable_pre(inner_html: str, css_class: str = "code-block") -> str:
-    """带「📋 复制」按钮的代码块；复制逻辑由 build_ui 注入的全局脚本统一处理。"""
-    return (
-        '<div class="code-wrap">'
-        '<button class="copy-btn" type="button" title="复制到剪贴板">📋 复制</button>'
-        f'<pre class="{css_class}">{inner_html}</pre>'
-        "</div>"
-    )
-
-
-_JSON_TOKEN_RE = re.compile(
-    r'("(?:\\.|[^"\\])*")(\s*:)?'  # 字符串（后跟冒号的是 key）
-    r"|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"  # 数字
-    r"|\b(true|false|null)\b"  # 字面量
-)
-
-
-def _highlight_json(text: str) -> str:
-    """Python 侧 JSON 语法高亮：只给 token 包 <span>，结构字符原样输出（均为 HTML 安全字符）。"""
-
-    def repl(match: re.Match) -> str:
-        string, colon, number, literal = match.groups()
-        if string is not None:
-            cls = "json-key" if colon else "json-str"
-            suffix = html.escape(colon) if colon else ""
-            return f'<span class="{cls}">{html.escape(string)}</span>{suffix}'
-        if number is not None:
-            return f'<span class="json-num">{html.escape(number)}</span>'
-        return f'<span class="json-bool">{html.escape(literal)}</span>'
-
-    return _JSON_TOKEN_RE.sub(repl, text)
-
-
-# 复制按钮的全局事件委托：注入一次，对所有动态渲染的卡片生效
-COPY_BUTTON_HEAD = """<script>
-document.addEventListener('click', function (event) {
-  var btn = event.target.closest('.copy-btn');
-  if (!btn) return;
-  var wrap = btn.closest('.code-wrap');
-  var pre = wrap ? wrap.querySelector('pre') : null;
-  if (!pre) return;
-  navigator.clipboard.writeText(pre.innerText).then(function () {
-    btn.textContent = '已复制 ✓';
-    setTimeout(function () { btn.textContent = '📋 复制'; }, 1200);
-  });
-});
-</script>"""
+def _load_css() -> str:
+    """读取外置样式表（ai_agent/static/web_ui.css）。"""
+    with open(os.path.join(_STATIC_DIR, "web_ui.css"), encoding="utf-8") as handle:
+        return handle.read()
 
 
 class AgentApp:
@@ -271,290 +214,11 @@ class AgentApp:
         return self.llm_panel_html(state), revision
 
     def llm_panel_html(self, state: SessionState) -> str:
-        calls = state.get("llm_calls") or []
-        parts = [self._llm_stats_html(llm_trace.usage_totals(calls))]
-        if not calls:
-            parts.append(
-                '<div class="llm-empty">'
-                "还没有 API 调用。<br>"
-                "发一条消息，这里会立刻出现本次请求的完整输入（system / user 消息 + 工具 schema + 采样参数），"
-                "模型返回后同一张卡片会补齐输出。"
-                "</div>"
-            )
-        else:
-            dropped = state.get("llm_dropped", 0)
-            if dropped:
-                parts.append(
-                    f'<div class="llm-dropped">更早的 {dropped} 条调用记录已丢弃'
-                    f"（面板最多保留 {MAX_LLM_CALLS} 条）</div>"
-                )
-            parts.append(self._llm_groups_html(state, calls))
-        return '<div class="llm-panel">' + "".join(parts) + "</div>"
-
-    def _llm_groups_html(self, state: SessionState, calls: list[LLMCall]) -> str:
-        """把调用卡片按轮次分组：历史轮折叠，最新一轮的卡片默认展开。"""
-        queries = state.get("llm_round_queries") or {}
-        groups: list[tuple[int, list[LLMCall]]] = []
-        for call in calls:
-            round_no = getattr(call, "round_no", 0)
-            if groups and groups[-1][0] == round_no:
-                groups[-1][1].append(call)
-            else:
-                groups.append((round_no, [call]))
-
-        last_group = len(groups) - 1
-        serial = 0
-        html_parts = []
-        for group_index, (round_no, group_calls) in enumerate(groups):
-            cards = []
-            for call in group_calls:
-                serial += 1
-                cards.append(
-                    self._llm_card_html(serial, call, expanded=group_index == last_group)
-                )
-            query = html.escape(str(queries.get(round_no, "")))
-            title = f"第 {round_no} 轮" if round_no else "未分组调用"
-            subtitle = f" · {query}" if query else ""
-            header = f"{title}{subtitle} · {len(group_calls)} 次调用"
-            if group_index == last_group:
-                html_parts.append(
-                    f'<div class="llm-round-head current">{html.escape(header)}</div>'
-                    + "".join(cards)
-                )
-            else:
-                html_parts.append(
-                    '<details class="llm-round">'
-                    f"<summary>{html.escape(header)}</summary>"
-                    + "".join(cards)
-                    + "</details>"
-                )
-        return '<div class="llm-rounds">' + "".join(html_parts) + "</div>"
-
-    @staticmethod
-    def _llm_stats_html(stats: dict[str, Any]) -> str:
-        approx = "≈" if stats["estimated"] else ""
-        failed = f'<span class="stat stat-bad">{stats["failed"]} 次失败</span>' if stats["failed"] else ""
-        hint = '<span class="stat stat-hint">≈ 表示按字符数估算</span>' if stats["estimated"] else ""
-        return (
-            '<div class="llm-stats">'
-            f'<span class="stat">共 <b>{stats["calls"]}</b> 次 API 调用</span>'
-            f'<span class="stat">输入 <b>{approx}{stats["prompt_tokens"]:,}</b> tok</span>'
-            f'<span class="stat">输出 <b>{approx}{stats["completion_tokens"]:,}</b> tok</span>'
-            f'<span class="stat">合计 <b>{approx}{stats["total_tokens"]:,}</b> tok</span>'
-            f'<span class="stat">耗时 <b>{stats["latency_ms"] / 1000:.1f}</b> s</span>'
-            f"{failed}{hint}"
-            "</div>"
-        )
-
-    def _llm_card_html(self, index: int, call: LLMCall, expanded: bool = False) -> str:
-        usage = call.usage_with_fallback()
-        approx = "≈" if usage["estimated"] else ""
-        status_text = {
-            "pending": "⏳ 生成中…",
-            "ok": f"✅ {call.finish_reason or 'ok'}",
-            "error": "❌ 调用失败",
-        }.get(call.status, call.status)
-        open_attr = " open" if expanded else ""
-
-        meta = [
-            f'<span class="chip">{html.escape(call.model)}</span>',
-            f'<span class="chip">{call.latency_ms / 1000:.2f}s</span>',
-            f'<span class="chip">{approx}{usage["total_tokens"]:,} tok</span>',
-        ]
-        if call.tools:
-            meta.append(f'<span class="chip chip-tool">{len(call.tools)} 个工具</span>')
-        if call.stream:
-            meta.append('<span class="chip">stream</span>')
-
-        body = [
-            self._llm_params_html(call),
-            '<div class="llm-cols">',
-            '<div class="llm-col"><div class="llm-sec-title">① 输入 · 发给模型的内容</div>',
-            self._messages_html(call.messages),
-            self._tools_html(call),
-            "</div>",
-            '<div class="llm-col"><div class="llm-sec-title">② 输出 · 模型返回的内容</div>',
-            self._output_html(call),
-            "</div>",
-            "</div>",
-            '<div class="llm-sec">',
-            self._collapsible("请求 JSON（等价于 HTTP body）", llm_trace.request_json(call), json_body=True),
-            self._collapsible("响应 JSON", llm_trace.response_json(call), json_body=True),
-            self._collapsible("等价 API 调用代码（可复制运行）", llm_trace.request_code(call)),
-            "</div>",
-        ]
-
-        return (
-            f'<details class="llm-card status-{call.status}"{open_attr}>'
-            f'<summary><span class="llm-idx">#{index + 1}</span>'
-            f'<span class="llm-label">{html.escape(call.label)}</span>'
-            f'<span class="llm-status">{status_text}</span>'
-            f'<span class="llm-meta">{"".join(meta)}</span></summary>'
-            f'<div class="llm-body">{"".join(body)}</div>'
-            "</details>"
-        )
-
-    @staticmethod
-    def _llm_params_html(call: LLMCall) -> str:
-        rows = [("model", call.model), ("base_url", call.base_url)]
-        rows.extend((key, value) for key, value in call.params.items())
-        cells = "".join(
-            f'<div class="param"><span class="param-k">{html.escape(str(key))}</span>'
-            f'<span class="param-v">{html.escape(str(value))}</span></div>'
-            for key, value in rows
-        )
-        return f'<div class="llm-params">{cells}</div>'
-
-    @staticmethod
-    def _messages_html(messages: list[dict]) -> str:
-        if not messages:
-            return '<div class="llm-none">（本次请求没有携带消息）</div>'
-        blocks = []
-        for message in messages:
-            role = str(message.get("role", "?"))
-            label = ROLE_LABEL.get(role, role)
-            css = ROLE_CLASS.get(role, "role-other")
-            content = message.get("content")
-            if isinstance(content, str):
-                body = content
-            else:
-                body = json.dumps(content, ensure_ascii=False, indent=2)
-            extras = []
-            if message.get("tool_call_id"):
-                extras.append(f'tool_call_id = {message["tool_call_id"]}')
-            if message.get("tool_calls"):
-                extras.append("tool_calls = " + json.dumps(message["tool_calls"], ensure_ascii=False))
-            extra_html = (
-                '<div class="msg-extra">' + html.escape(" · ".join(extras)) + "</div>" if extras else ""
-            )
-            blocks.append(
-                f'<div class="msg {css}">'
-                f'<div class="msg-head"><span class="msg-role">{html.escape(label)}</span>'
-                f'<span class="msg-len">{len(body):,} 字符</span></div>'
-                f"{extra_html}"
-                + _copyable_pre(html.escape(body), "msg-body")
-                + "</div>"
-            )
-        return '<div class="msg-list">' + "".join(blocks) + "</div>"
-
-    @staticmethod
-    def _tools_html(call: LLMCall) -> str:
-        if not call.tools:
-            return '<div class="llm-none">（本次请求未携带 tools，模型无法进行 Function Calling）</div>'
-        names = call.tool_names
-        preview = "、".join(names[:8]) + ("…" if len(names) > 8 else "")
-        return AgentApp._collapsible(
-            f"tools · 工具 schema（{len(call.tools)} 个）",
-            f"可用工具：{preview}\n\n" + json.dumps(call.tools, ensure_ascii=False, indent=2),
-        )
-
-    @staticmethod
-    def _output_html(call: LLMCall) -> str:
-        if call.status == "error":
-            return f'<div class="llm-error">调用失败：{html.escape(str(call.error or "未知错误"))}</div>'
-
-        parts = []
-        if call.reasoning_content:
-            parts.append(
-                '<div class="out-block"><div class="out-title">reasoning_content · 模型内部推理</div>'
-                + _copyable_pre(html.escape(call.reasoning_content), "msg-body")
-                + "</div>"
-            )
-        if call.content:
-            parts.append(
-                '<div class="out-block"><div class="out-title">content · 给用户的回答</div>'
-                + _copyable_pre(html.escape(call.content), "msg-body")
-                + "</div>"
-            )
-
-        if call.tool_calls:
-            parts.append(
-                '<div class="out-block"><div class="out-title">'
-                f"tool_calls · 模型要求执行的 {len(call.tool_calls)} 个工具</div>"
-                + "".join(AgentApp._tool_call_html(tool_call) for tool_call in call.tool_calls)
-                + '<div class="llm-note">'
-                "工具执行结果会以 <code>role: tool</code> 消息回到下一轮请求的输入里——"
-                "在下一次调用的「① 输入」中可以看到它的完整样子。"
-                "</div></div>"
-            )
-
-        if call.status == "pending":
-            if not parts:
-                return '<div class="llm-pending">等待模型返回…</div>'
-            # 流式进行中：先展示已生成的部分
-            parts.append('<div class="llm-pending streaming">⏳ 正在生成…</div>')
-            return "".join(parts)
-
-        if not parts:
-            parts.append('<div class="llm-none">（content 为空）</div>')
-
-        usage = call.usage_with_fallback()
-        approx = "≈" if usage["estimated"] else ""
-        parts.append(
-            '<div class="out-usage">'
-            f'<span class="chip">finish_reason: {html.escape(str(call.finish_reason))}</span>'
-            f'<span class="chip">prompt {approx}{usage["prompt_tokens"]:,}</span>'
-            f'<span class="chip">completion {approx}{usage["completion_tokens"]:,}</span>'
-            f'<span class="chip">total {approx}{usage["total_tokens"]:,}</span>'
-            "</div>"
-        )
-        return "".join(parts)
-
-    @staticmethod
-    def _tool_call_html(tool_call: dict) -> str:
-        arguments = str(tool_call.get("arguments", ""))
-        try:
-            arguments = json.dumps(json.loads(arguments), ensure_ascii=False, indent=2)
-        except (json.JSONDecodeError, TypeError):
-            pass
-        return (
-            '<div class="tc">'
-            f'<div class="tc-head">🔧 <b>{html.escape(str(tool_call.get("name", "")))}</b>'
-            f'<span class="tc-id">{html.escape(str(tool_call.get("id", "")))}</span></div>'
-            + _copyable_pre(_highlight_json(arguments), "tc-args")
-            + "</div>"
-        )
-
-    @staticmethod
-    def _collapsible(title: str, body: str, json_body: bool = False) -> str:
-        content = _highlight_json(body) if json_body else html.escape(body)
-        return (
-            '<details class="llm-more">'
-            f"<summary>{html.escape(title)}</summary>"
-            + _copyable_pre(content, "code-block")
-            + "</details>"
-        )
+        return web_render.llm_panel_html(state)
 
     def trace_html(self, state: SessionState) -> str:
-        colors = {
-            "info": "#888888",
-            "tool_call": "#1a73e8",
-            "tool_call_mcp": "#7b1fa2",
-            "tool_result": "#2e7d32",
-            "thought": "#9c27b0",
-            "action": "#ff6f00",
-            "observation": "#546e7a",
-            "agent": "#d32f2f",
-            "error": "#c62828",
-            "divider": "#555555",
-        }
-        parts = ['<div class="trace-box">']
-        for entry in state.get("trace_buffer", []):
-            text = html.escape(str(entry.get("text", ""))).replace("\n", "<br>")
-            kind = entry.get("kind", "info")
-            styles = [f"color:{colors.get(kind, '#cccccc')}"]
-            if kind == "thought":
-                styles.append("font-style:italic")
-            if kind in {"error", "agent"}:
-                styles.append("font-weight:bold")
-            if kind == "divider":
-                styles.append("border-top:1px dashed #444;margin:4px 0")
-            parts.append(
-                f'<pre style="margin:2px 0;font-family:monospace;font-size:13px;{";".join(styles)}">'
-                f"{text}</pre>"
-            )
-        parts.append("</div>")
-        return "\n".join(parts)
+        return web_render.trace_html(state.get("trace_buffer", []))
+
 
     def _trace_event(self, state: SessionState, event) -> None:
         if event.kind == "route_selected":
@@ -917,264 +581,7 @@ class AgentApp:
 
 
 def build_ui(app: AgentApp) -> gr.Blocks:
-    css = """
-    /* ---------- 执行轨迹 ---------- */
-    .trace-box {
-        background: #1a1a2e;
-        border-radius: 8px;
-        padding: 10px 12px;
-        min-height: 180px;
-        max-height: 560px;
-        overflow-y: auto;
-        font-family: 'IBM Plex Mono', 'Cascadia Code', Consolas, monospace;
-    }
-    .trace-box pre {
-        white-space: pre-wrap;
-        word-break: break-all;
-    }
-
-    /* ---------- LLM API 调用检查器 ---------- */
-    .llm-panel {
-        background: #0f1117;
-        border: 1px solid #232735;
-        border-radius: 10px;
-        padding: 10px;
-        max-height: 620px;
-        overflow-y: auto;
-        font-family: 'IBM Plex Mono', 'Cascadia Code', Consolas, monospace;
-        font-size: 12.5px;
-        line-height: 1.6;
-        color: #d7dae0;
-    }
-    .llm-stats {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-        padding: 4px 0 10px;
-        margin-bottom: 10px;
-        border-bottom: 1px solid #232735;
-        position: sticky;
-        top: -10px;
-        z-index: 5;
-        background: #0f1117;
-    }
-    .llm-stats .stat {
-        background: #1a1f2e;
-        border: 1px solid #2a3145;
-        border-radius: 999px;
-        padding: 2px 10px;
-        color: #9aa4b8;
-    }
-    .llm-stats .stat b { color: #e8ebf0; }
-    .llm-stats .stat-bad { border-color: #7f2b2b; color: #ff9c9c; }
-    .llm-stats .stat-hint { border-style: dashed; color: #7b8496; }
-    .llm-empty, .llm-none, .llm-pending {
-        color: #7b8496;
-        padding: 12px;
-        line-height: 1.9;
-        background: #141824;
-        border-radius: 8px;
-    }
-    .llm-card {
-        border: 1px solid #2a3145;
-        border-radius: 8px;
-        margin-bottom: 8px;
-        background: #141824;
-    }
-    .llm-card > summary {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex-wrap: wrap;
-        padding: 8px 10px;
-        cursor: pointer;
-        list-style: none;
-    }
-    .llm-card > summary::-webkit-details-marker { display: none; }
-    .llm-card[open] > summary { border-bottom: 1px solid #2a3145; }
-    @keyframes llm-pulse {
-        0%, 100% { box-shadow: inset 3px 0 0 #d9a441; }
-        50% { box-shadow: inset 3px 0 0 rgba(217, 164, 65, 0.25); }
-    }
-    .llm-card.status-pending > summary {
-        box-shadow: inset 3px 0 0 #d9a441;
-        animation: llm-pulse 1.4s ease-in-out infinite;
-    }
-    .llm-card.status-ok > summary { box-shadow: inset 3px 0 0 #3f9e63; }
-    .llm-card.status-error > summary { box-shadow: inset 3px 0 0 #c0392b; }
-    .llm-idx { color: #6f7b91; }
-    .llm-label { color: #e8ebf0; font-weight: 600; }
-    .llm-status { color: #9aa4b8; }
-    .llm-meta { margin-left: auto; display: flex; gap: 5px; flex-wrap: wrap; }
-    .chip {
-        background: #1e2434;
-        border: 1px solid #2f374b;
-        border-radius: 6px;
-        padding: 1px 7px;
-        color: #9aa4b8;
-        font-size: 11.5px;
-    }
-    .chip-tool { border-color: #3d5a80; color: #8fb8e8; }
-    .llm-body { padding: 10px; }
-    .llm-params { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-    .param {
-        background: #1a1f2e;
-        border: 1px solid #262d3f;
-        border-radius: 6px;
-        padding: 3px 8px;
-    }
-    .param-k { color: #7b8496; margin-right: 6px; }
-    .param-v { color: #cfd6e4; }
-    .llm-sec { margin-bottom: 12px; }
-    .llm-sec-title { color: #8fb8e8; font-weight: 600; margin: 6px 0; }
-    .msg-list { display: flex; flex-direction: column; gap: 6px; }
-    .msg {
-        border: 1px solid #262d3f;
-        border-left-width: 3px;
-        border-radius: 6px;
-        background: #11151f;
-    }
-    .msg-head {
-        display: flex;
-        gap: 8px;
-        padding: 4px 8px;
-        border-bottom: 1px solid #1d2331;
-    }
-    .msg-role { font-weight: 600; }
-    .msg-len { color: #6f7b91; margin-left: auto; }
-    .msg-extra { color: #6f7b91; padding: 2px 8px; word-break: break-all; }
-    .msg-body, .code-block, .tc-args {
-        margin: 0;
-        padding: 8px;
-        white-space: pre-wrap;
-        word-break: break-word;
-        max-height: 280px;
-        overflow: auto;
-        color: #cfd6e4;
-    }
-    .role-system { border-left-color: #d9a441; }
-    .role-system .msg-role { color: #d9a441; }
-    .role-user { border-left-color: #3d8bfd; }
-    .role-user .msg-role { color: #6fb0ff; }
-    .role-assistant { border-left-color: #3f9e63; }
-    .role-assistant .msg-role { color: #62c98a; }
-    .role-tool { border-left-color: #9b6bd6; }
-    .role-tool .msg-role { color: #b98bea; }
-    .out-block {
-        border: 1px solid #262d3f;
-        border-radius: 6px;
-        background: #11151f;
-        margin-bottom: 6px;
-    }
-    .out-title {
-        padding: 4px 8px;
-        border-bottom: 1px solid #1d2331;
-        color: #62c98a;
-        font-weight: 600;
-    }
-    .out-usage { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
-    .llm-error {
-        background: #2a1416;
-        border: 1px solid #7f2b2b;
-        color: #ff9c9c;
-        border-radius: 6px;
-        padding: 8px;
-    }
-    .llm-note { color: #7b8496; padding: 6px 8px; line-height: 1.8; }
-    .llm-note code {
-        background: #1e2434;
-        padding: 0 4px;
-        border-radius: 4px;
-        color: #b98bea;
-    }
-    .tc {
-        border: 1px solid #2f374b;
-        border-radius: 6px;
-        background: #11151f;
-        margin: 5px 0;
-    }
-    .tc-head { padding: 4px 8px; border-bottom: 1px solid #1d2331; color: #8fb8e8; }
-    .tc-id { color: #6f7b91; margin-left: 8px; font-size: 11.5px; }
-    .llm-more { border: 1px dashed #2f374b; border-radius: 6px; margin-top: 6px; }
-    .llm-more > summary { padding: 5px 8px; cursor: pointer; color: #9aa4b8; }
-    .llm-more[open] > summary { border-bottom: 1px solid #1d2331; }
-    .inspector-hint { color: #7b8496; font-size: 12.5px; line-height: 1.8; }
-
-    /* ---------- 轮次分组 ---------- */
-    .llm-round {
-        border: 1px solid #232735;
-        border-radius: 8px;
-        margin-bottom: 8px;
-        background: #10141d;
-    }
-    .llm-round > summary {
-        padding: 7px 10px;
-        cursor: pointer;
-        color: #9aa4b8;
-        font-size: 12px;
-    }
-    .llm-round > summary:hover { color: #cfd6e4; }
-    .llm-round[open] > summary { border-bottom: 1px dashed #232735; }
-    .llm-round-head {
-        color: #8fb8e8;
-        font-size: 12px;
-        font-weight: 600;
-        padding: 4px 2px 8px;
-    }
-    .llm-dropped {
-        color: #7b8496;
-        font-size: 12px;
-        border: 1px dashed #2f374b;
-        border-radius: 6px;
-        padding: 4px 8px;
-        margin-bottom: 8px;
-    }
-
-    /* ---------- 输入输出对照双栏 ---------- */
-    .llm-cols {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
-        margin-bottom: 12px;
-    }
-    @media (max-width: 900px) {
-        .llm-cols { grid-template-columns: 1fr; }
-    }
-    .llm-col { min-width: 0; }
-
-    /* ---------- 复制按钮 ---------- */
-    .code-wrap { position: relative; }
-    .copy-btn {
-        position: absolute;
-        top: 4px;
-        right: 4px;
-        z-index: 2;
-        background: #1e2434;
-        border: 1px solid #2f374b;
-        border-radius: 6px;
-        color: #9aa4b8;
-        font-size: 11px;
-        padding: 1px 8px;
-        cursor: pointer;
-        opacity: 0;
-        transition: opacity 0.15s;
-    }
-    .code-wrap:hover .copy-btn { opacity: 1; }
-    .copy-btn:hover { color: #e8ebf0; border-color: #3d5a80; }
-
-    /* ---------- JSON 语法高亮 ---------- */
-    .json-key { color: #8fb8e8; }
-    .json-str { color: #98c379; }
-    .json-num { color: #d19a66; }
-    .json-bool { color: #c678dd; }
-
-    /* ---------- 流式生成中 ---------- */
-    .llm-pending.streaming {
-        margin-top: 6px;
-        padding: 4px 8px;
-        animation: llm-pulse 1.4s ease-in-out infinite;
-    }
-    """
+    css = _load_css()
 
     default_prompt = app.new_state()["system_prompt"]
 
