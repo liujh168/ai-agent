@@ -71,14 +71,16 @@ class Config:
     chunk_size: int = 500
     chunk_overlap: int = 50
     rag_cache_file: str = "_rag_cache.json"
+    # FAISS 可选加速阈值：chunk 数超过该值且安装了 faiss-cpu 时启用 FAISS 索引检索
+    rag_faiss_threshold: int = 2000
     project_root: str = _PROJECT_ROOT
     workspace_root: str = _PROJECT_ROOT
     request_timeout: float = 120.0
     enable_dangerous_tools: bool = False
     # 长对话压缩阈值：history 总字符数超过该值时自动摘要压缩
     history_max_chars: int = 5000
-    # MCP 服务器 URL 列表（可选）。多个用分号分隔，例如:
-    #   MCP_SERVERS=https://mcp.example.com/tools;http://localhost:9000/sse
+    # MCP 服务器列表（可选）。分号分隔；http(s):// 走 HTTP Transport，stdio: 前缀走本地子进程
+    #   MCP_SERVERS=https://mcp.example.com/tools;stdio:python -m my_mcp_server
     mcp_servers: tuple = ()
     mcp_allowed_tools: tuple = ()
     # Skill 定义文件目录（可选）。空字符串或目录不存在则跳过 Skill 加载。
@@ -94,6 +96,38 @@ class Config:
     wp_url: str = ""
     wp_user: str = ""  # WordPress 用户名。为空时尝试从 wp_app_password 空格分隔解析
     wp_app_password: str = ""
+
+    def validate(self) -> None:
+        """启动时配置校验：发现缺失/非法字段立即抛出带中文说明的 ValueError。"""
+        problems: list[str] = []
+        if not self.base_url.startswith(("http://", "https://")):
+            problems.append(
+                f"base_url 必须以 http:// 或 https:// 开头，当前为 {self.base_url!r}"
+                "（对应环境变量 LM_STUDIO_BASE_URL）"
+            )
+        if not self.api_key.strip():
+            problems.append("api_key 不能为空（对应环境变量 LM_STUDIO_API_KEY）")
+        if not self.model.strip():
+            problems.append("model 不能为空（对应环境变量 LM_STUDIO_MODEL）")
+        if not self.embed_model.strip():
+            problems.append("embed_model 不能为空（对应环境变量 EMBED_MODEL）")
+        if self.chunk_size <= 0:
+            problems.append(f"chunk_size 必须为正整数，当前为 {self.chunk_size}")
+        if not 0 <= self.chunk_overlap < self.chunk_size:
+            problems.append(
+                f"chunk_overlap 必须满足 0 <= chunk_overlap < chunk_size，"
+                f"当前 chunk_overlap={self.chunk_overlap}、chunk_size={self.chunk_size}"
+            )
+        if self.request_timeout <= 0:
+            problems.append(f"request_timeout 必须为正数，当前为 {self.request_timeout}")
+        if self.history_max_chars <= 0:
+            problems.append(f"history_max_chars 必须为正整数，当前为 {self.history_max_chars}")
+        if self.rag_faiss_threshold <= 0:
+            problems.append(
+                f"rag_faiss_threshold 必须为正整数，当前为 {self.rag_faiss_threshold}"
+            )
+        if problems:
+            raise ValueError("配置校验失败，请修正 .env 后重启：\n- " + "\n- ".join(problems))
 
     @classmethod
     def from_env(cls) -> Config:
@@ -111,6 +145,7 @@ class Config:
             chunk_size=_env_int("RAG_CHUNK_SIZE", cls.chunk_size),
             chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", cls.chunk_overlap),
             rag_cache_file=os.environ.get("RAG_CACHE_FILE", cls.rag_cache_file),
+            rag_faiss_threshold=_env_int("RAG_FAISS_THRESHOLD", cls.rag_faiss_threshold),
             project_root=os.environ.get("PROJECT_ROOT", cls.project_root),
             workspace_root=os.environ.get("AGENT_WORKSPACE_ROOT") or cls.workspace_root,
             request_timeout=_env_float("LM_STUDIO_TIMEOUT", cls.request_timeout),

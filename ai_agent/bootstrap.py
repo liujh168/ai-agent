@@ -58,6 +58,7 @@ class AgentServices:
     """CLI 与 Web UI 共享的运行时服务集合。构造过程不访问网络（RAG 延迟构建）。"""
 
     def __init__(self, cfg: Config):
+        cfg.validate()
         self.cfg = cfg
         self.project_root = os.path.abspath(cfg.project_root)
         self.workspace_root = os.path.abspath(cfg.workspace_root)
@@ -104,6 +105,7 @@ class AgentServices:
                     chunk_overlap=self.cfg.chunk_overlap,
                     cache_file=resolve_rag_cache_path(self.cfg, self.project_root),
                     request_timeout=self.cfg.request_timeout,
+                    faiss_threshold=self.cfg.rag_faiss_threshold,
                 )
                 rag_dirs = (
                     list(self.cfg.rag_directories)
@@ -142,6 +144,7 @@ class AgentServices:
             mcp_manager=self.mcp_manager,
             workspace_root=self.workspace_root,
         )
+        app_core.validate_tool_schemas(app_core.TOOL_SCHEMAS, tool_map)
         self._register_skills(list(tool_map.keys()))
         return tool_map
 

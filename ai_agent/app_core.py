@@ -625,7 +625,14 @@ def _build_demo_tools(client, get_rag, test_image: str, workspace_root: str, too
         )
 
     def run_multi_agent_tool(task: str) -> str:
-        return run_multi_agent(client, task)
+        # Executor 可用的工具集：复用 ReAct 的"干净"过滤（剔除内部演示工具），
+        # 再去掉 run_multi_agent 自身，避免 Executor 递归触发多 Agent 流水线
+        executor_map = clean_react_tool_map(tool_map)
+        executor_map.pop("run_multi_agent", None)
+        executor_schemas = [
+            s for s in TOOL_SCHEMAS if s["function"]["name"] in executor_map
+        ]
+        return run_multi_agent(client, task, tools=executor_schemas, tool_map=executor_map)
 
     return {
         "demo_stream_chat": demo_stream_chat,
@@ -715,6 +722,62 @@ def filter_tool_schemas(tool_schemas: list[dict], policy: ToolPolicy) -> list[di
                 continue
         filtered.append(schema)
     return filtered
+
+
+def validate_tool_schemas(tool_schemas: list[dict], tool_map: dict | None = None) -> None:
+    """
+    启动时校验工具 schema 是否为合法的 OpenAI function calling 格式：
+    type 必须是 "function"，function 下必须有非空 name/description，
+    parameters 必须是 object 类型、properties 必须是 dict，
+    required 中声明的字段必须存在于 properties 中，工具名不得重复。
+    传入 tool_map 时额外检查：每个 schema 声明的工具都有对应的 callable 注册。
+    不合法时抛出 ValueError，指明具体工具名与问题。
+    """
+    problems: list[str] = []
+    seen: set[str] = set()
+    for schema in tool_schemas:
+        name = "<未命名>"
+        if isinstance(schema, dict) and isinstance(schema.get("function"), dict):
+            name = schema["function"].get("name") or name
+        prefix = f"工具 {name!r}"
+        if not isinstance(schema, dict) or schema.get("type") != "function":
+            problems.append(f"{prefix}：schema 必须是 type='function' 的对象")
+            continue
+        func = schema.get("function")
+        if not isinstance(func, dict):
+            problems.append(f"{prefix}：缺少 function 字段")
+            continue
+        if not isinstance(func.get("name"), str) or not func["name"].strip():
+            problems.append(f"{prefix}：function.name 缺失或为空")
+        elif func["name"] in seen:
+            problems.append(f"{prefix}：工具名重复定义")
+        else:
+            seen.add(func["name"])
+        if not isinstance(func.get("description"), str) or not func["description"].strip():
+            problems.append(f"{prefix}：function.description 缺失或为空")
+        params = func.get("parameters")
+        if not isinstance(params, dict) or params.get("type") != "object":
+            problems.append(f"{prefix}：parameters 必须是 type='object' 的 JSON Schema")
+            continue
+        properties = params.get("properties", {})
+        if not isinstance(properties, dict):
+            problems.append(f"{prefix}：parameters.properties 必须是对象")
+            continue
+        required = params.get("required", [])
+        if not isinstance(required, list):
+            problems.append(f"{prefix}：parameters.required 必须是数组")
+            continue
+        for field in required:
+            if field not in properties:
+                problems.append(f"{prefix}：required 中的字段 {field!r} 未在 properties 中定义")
+    if tool_map is not None:
+        for name in seen:
+            if name not in tool_map:
+                problems.append(f"工具 {name!r}：schema 已声明但未注册对应 callable")
+            elif not callable(tool_map[name]):
+                problems.append(f"工具 {name!r}：注册对象不可调用")
+    if problems:
+        raise ValueError("工具 schema 校验失败：\n- " + "\n- ".join(problems))
 
 
 def make_summarize_history(client, get_history, set_history) -> callable:

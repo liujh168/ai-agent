@@ -620,6 +620,7 @@ def main() -> None:
     load_env()
 
     cfg = Config.from_env()
+    cfg.validate()
     client = LMStudioClient(
         cfg.base_url,
         cfg.api_key,
@@ -663,6 +664,7 @@ def main() -> None:
                     chunk_overlap=cfg.chunk_overlap,
                     cache_file=os.path.join(workspace, "_rag_cache.json"),
                     request_timeout=cfg.request_timeout,
+                    faiss_threshold=cfg.rag_faiss_threshold,
                 )
                 rag.build([doc_dst])
                 print("  RAG 就绪")

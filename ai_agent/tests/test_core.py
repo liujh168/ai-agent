@@ -12,7 +12,9 @@ from ai_agent.app_core import (
     TOOL_SCHEMAS,
     build_tool_map,
     clean_react_tool_map,
+    validate_tool_schemas,
 )
+from ai_agent.client import LMStudioClient
 from ai_agent.config import Config
 from ai_agent.eval import EVAL_CASES, EvalCase, Evaluator, ToolCallTracker
 from ai_agent.multi_agent import _parse_critic_decision, _parse_subtasks
@@ -186,6 +188,83 @@ class TestEvalToolOutputChecks:
 
 
 # ============================================================
+# 工具 schema 启动校验
+# ============================================================
+
+
+def _good_schema(name: str = "foo") -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "测试工具",
+            "parameters": {
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],
+            },
+        },
+    }
+
+
+class TestValidateToolSchemas:
+    def test_builtin_schemas_are_valid(self):
+        """项目内置的 TOOL_SCHEMAS 必须全部通过格式校验"""
+        validate_tool_schemas(TOOL_SCHEMAS)
+
+    def test_builtin_schemas_all_have_callables(self):
+        """TOOL_SCHEMAS 声明的每个工具在 build_tool_map 中都有对应 callable"""
+
+        class _DummyClient:
+            pass
+
+        tool_map = build_tool_map(
+            _DummyClient(),
+            lambda: None,
+            "_test_chart.png",
+            get_history=lambda: [],
+            set_history=lambda h: None,
+        )
+        validate_tool_schemas(TOOL_SCHEMAS, tool_map)
+
+    def test_missing_description_rejected(self):
+        import pytest
+
+        schema = _good_schema()
+        schema["function"]["description"] = ""
+        with pytest.raises(ValueError, match=r"foo.*description"):
+            validate_tool_schemas([schema])
+
+    def test_parameters_must_be_object(self):
+        import pytest
+
+        schema = _good_schema()
+        schema["function"]["parameters"] = {"type": "string"}
+        with pytest.raises(ValueError, match=r"foo.*type='object'"):
+            validate_tool_schemas([schema])
+
+    def test_required_field_must_exist_in_properties(self):
+        import pytest
+
+        schema = _good_schema("bar")
+        schema["function"]["parameters"]["required"] = ["y"]
+        with pytest.raises(ValueError, match=r"bar.*'y' 未在 properties 中定义"):
+            validate_tool_schemas([schema])
+
+    def test_duplicate_names_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="重复定义"):
+            validate_tool_schemas([_good_schema(), _good_schema()])
+
+    def test_schema_without_callable_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError, match=r"foo.*未注册对应 callable"):
+            validate_tool_schemas([_good_schema()], tool_map={})
+
+
+# ============================================================
 # 多 Agent 解析器边界
 # ============================================================
 
@@ -211,6 +290,28 @@ class TestMultiAgentParsers:
     def test_critic_default_pass(self):
         # 没有明显标记时默认通过，避免卡死循环
         assert _parse_critic_decision("计划看起来不错") is True
+
+    def test_critic_json_decision(self):
+        """结构化评审协议：JSON {"decision", "reason"} 直接解析"""
+        assert _parse_critic_decision('{"decision": "approve", "reason": "计划完整可执行"}') is True
+        assert _parse_critic_decision('{"decision": "reject", "reason": "缺少关键步骤"}') is False
+
+    def test_critic_json_chinese_decision(self):
+        """decision 也接受中文「通过/不通过」"""
+        assert _parse_critic_decision('{"decision": "通过", "reason": "整体合格"}') is True
+        assert _parse_critic_decision('{"decision": "不通过", "reason": "遗漏测试环节"}') is False
+
+    def test_critic_json_embedded_in_text(self):
+        """模型在 JSON 外面包了额外文字/围栏时，提取 JSON 片段再解析"""
+        text = '评审结论如下：\n```json\n{"decision": "reject", "reason": "计划不可执行"}\n```'
+        assert _parse_critic_decision(text) is False
+        text2 = '好的，我的意见是 {"decision": "approve", "reason": "通过"} 以上。'
+        assert _parse_critic_decision(text2) is True
+
+    def test_critic_invalid_json_falls_back_to_legacy(self):
+        """JSON 解析失败时回退到旧的 emoji/关键词启发式，流水线不崩"""
+        assert _parse_critic_decision('{"decision": 不是合法JSON') is True  # 无标记 → 默认通过
+        assert _parse_critic_decision("❌ 不通过\n理由：缺少步骤") is False
 
     def test_parse_subtasks_chinese_and_western(self):
         plan = "1. 第一步\n2、第二步\n3) 第三步"
@@ -314,6 +415,50 @@ class TestRAGOffline:
 
 
 # ============================================================
+# 历史摘要压缩的硬截断回退（mock LLM，不依赖 LM Studio）
+# ============================================================
+
+
+class TestSummarizeFallback:
+    def _long_history(self) -> list[dict]:
+        history = [{"role": "system", "content": "sys"}]
+        for i in range(8):
+            history.append({"role": "user", "content": f"问题 {i}"})
+            history.append({"role": "assistant", "content": f"回答 {i}"})
+        return history
+
+    def test_llm_exception_falls_back_to_hard_truncate(self):
+        """摘要 LLM 调用抛异常时回退硬截断：system + 截断占位 + 最近 4 条，不崩溃"""
+        client = LMStudioClient()
+
+        def _boom(messages, **kwargs):
+            raise RuntimeError("连接失败")
+
+        client.chat = _boom
+        history = self._long_history()
+        result = client.summarize_messages(history, keep_recent=4)
+        assert result[0] == {"role": "system", "content": "sys"}
+        assert "【历史已截断】" in result[1]["content"]
+        assert result[-4:] == history[-4:]
+
+    def test_empty_summary_falls_back_to_hard_truncate(self):
+        """摘要返回空/纯空白内容同样按失败处理，回退硬截断"""
+        client = LMStudioClient()
+        client.chat = lambda messages, **kwargs: "   "
+        result = client.summarize_messages(self._long_history(), keep_recent=4)
+        assert "【历史已截断】" in result[1]["content"]
+
+    def test_normal_summary_still_used(self):
+        """摘要成功时行为不变：system + 【历史摘要】+ 最近 4 条"""
+        client = LMStudioClient()
+        client.chat = lambda messages, **kwargs: "这是摘要"
+        history = self._long_history()
+        result = client.summarize_messages(history, keep_recent=4)
+        assert result[1]["content"] == "【历史摘要】这是摘要"
+        assert result[-4:] == history[-4:]
+
+
+# ============================================================
 # 配置模块
 # ============================================================
 
@@ -346,6 +491,65 @@ class TestConfig:
         assert Config.from_env().history_max_chars == 5000
         monkeypatch.setenv("HISTORY_MAX_CHARS", "8000")
         assert Config.from_env().history_max_chars == 8000
+
+    def test_rag_faiss_threshold_env_override(self, monkeypatch):
+        """rag_faiss_threshold 默认 2000，可被 RAG_FAISS_THRESHOLD 覆盖"""
+        assert Config.from_env().rag_faiss_threshold == 2000
+        monkeypatch.setenv("RAG_FAISS_THRESHOLD", "500")
+        assert Config.from_env().rag_faiss_threshold == 500
+
+    def test_validate_rag_faiss_threshold_must_be_positive(self):
+        """rag_faiss_threshold 为 0 或负数时被 validate() 拦截"""
+        import pytest
+
+        with pytest.raises(ValueError, match="rag_faiss_threshold 必须为正整数"):
+            Config(rag_faiss_threshold=0).validate()
+        with pytest.raises(ValueError, match="rag_faiss_threshold 必须为正整数"):
+            Config(rag_faiss_threshold=-100).validate()
+
+    def test_validate_defaults_pass(self):
+        """默认配置与 from_env 配置都应通过启动校验"""
+        Config().validate()
+        Config.from_env().validate()
+
+    def test_validate_bad_base_url(self):
+        import pytest
+
+        with pytest.raises(ValueError, match=r"base_url.*http://"):
+            Config(base_url="localhost:1234/v1").validate()
+
+    def test_validate_empty_required_fields(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="api_key 不能为空"):
+            Config(api_key="  ").validate()
+        with pytest.raises(ValueError, match="model 不能为空"):
+            Config(model="").validate()
+        with pytest.raises(ValueError, match="embed_model 不能为空"):
+            Config(embed_model="").validate()
+
+    def test_validate_chunk_overlap_must_be_smaller_than_chunk_size(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="chunk_overlap"):
+            Config(chunk_size=100, chunk_overlap=100).validate()
+
+    def test_validate_collects_multiple_problems(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="配置校验失败") as exc_info:
+            Config(base_url="bad", api_key="").validate()
+        assert "base_url" in str(exc_info.value)
+        assert "api_key" in str(exc_info.value)
+
+    def test_agent_services_validates_config_at_startup(self):
+        """启动入口 AgentServices 构造时即触发校验，配置错误立刻暴露"""
+        import pytest
+
+        from ai_agent.bootstrap import AgentServices
+
+        with pytest.raises(ValueError, match="配置校验失败"):
+            AgentServices(Config(base_url="bad"))
 
     def test_load_env_idempotent_and_no_override(self, monkeypatch):
         """load_env 幂等且不覆盖已有环境变量（优先级：系统环境变量 > .env）"""

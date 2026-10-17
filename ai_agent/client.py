@@ -253,26 +253,44 @@ class LMStudioClient:
         clean = [m for m in to_summarize if m.get("role") in ("user", "assistant") and m.get("content")]
         history_text = "\n".join(f"[{m['role'].upper()}]: {m['content']}" for m in clean)
 
-        summary = self.chat(
-            [
-                {
-                    "role": "user",
-                    "content": (
-                        "请对以下对话历史做简洁摘要（200-300 字），保留关键事实、决定、已完成任务和"
-                        "待续事项，用第三人称叙述，不要省略时间、数字、名字等硬信息。\n\n"
-                        f"=== 对话历史 ===\n{history_text}\n\n=== 摘要 ==="
-                    ),
-                }
-            ],
-            temperature=0.1,
-            max_tokens=512,
-            label="历史摘要压缩",
-        )
+        summary = None
+        try:
+            summary = self.chat(
+                [
+                    {
+                        "role": "user",
+                        "content": (
+                            "请对以下对话历史做简洁摘要（200-300 字），保留关键事实、决定、已完成任务和"
+                            "待续事项，用第三人称叙述，不要省略时间、数字、名字等硬信息。\n\n"
+                            f"=== 对话历史 ===\n{history_text}\n\n=== 摘要 ==="
+                        ),
+                    }
+                ],
+                temperature=0.1,
+                max_tokens=512,
+                label="历史摘要压缩",
+            )
+        except Exception as exc:
+            log.warning("历史摘要 LLM 调用失败，回退为硬截断: %s", exc)
 
         new_history = []
         if system_msg:
             new_history.append(system_msg)
-        new_history.append({"role": "assistant", "content": f"【历史摘要】{summary}"})
+        if summary and summary.strip():
+            new_history.append({"role": "assistant", "content": f"【历史摘要】{summary}"})
+        else:
+            # 摘要失败/为空 → 硬截断回退：丢弃较早历史，只留占位说明，保证会话不崩溃
+            if summary is not None:
+                log.warning("历史摘要返回空内容，回退为硬截断")
+            new_history.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"【历史已截断】较早的 {len(to_summarize)} 条消息因摘要失败被直接丢弃，"
+                        "仅保留最近的对话内容。"
+                    ),
+                }
+            )
         new_history.extend(recent)
         return new_history
 
