@@ -304,6 +304,26 @@ LLM 收到结果 "用户取消" → 放弃执行 → 回复"好的，我没执�
 
 ---
 
+## 七、动手练习：把演进方向做出来
+
+表里前两行（PowerShell AST、human_confirm 结构化返回）是最适合亲手实现的两个——它们各自只动第一层或第三层的一个点，却能让"纵深防御"从概念变成你写过一遍的代码。每个练习给出源码锚点和可检查的验收标准。
+
+### 练习 1：用 PowerShell AST 解析替代关键词黑名单
+
+- **背景**：第一层防御的 PowerShell 部分是两份字符串清单——`_DANGEROUS_CMD_PATTERNS`（`ai_agent/tools/system.py:50-106`，约 40 条子串匹配）加 `_is_dangerous_chain()` 的链式绕过检测（`:132-138`）。它能拦住 `"Remove-Item -Recurse -Force"`，但拦不住 `&('Remove'+'-Item') x -Recurse`——字符串拼接在黑名单眼里只是一段无害文本，在 PowerShell 里却会被求值成真实命令。黑名单在和"语言的表达能力"对抗，这是结构性劣势。
+- **任务**：让 PowerShell 自己解析自己——调用 PowerShell 的 `[System.Management.Automation.Language.Parser]::ParseInput()` 把待执行命令解析成 AST，按节点语义判定危险：遍历 `CommandAst` 节点取 `GetCommandName()` 的真实命令名（变量引用、拼接表达式会被求值出真面目），再对照危险命令集合判定。判定通过才放行到 `subprocess.run`。
+- **提示**：这里有个"鸡生蛋"问题要先想清楚——为了校验一条 PowerShell 命令，你得先起一次 PowerShell 进程做解析。要点是：① 校验用的解析命令模板是**固定的、不含用户输入拼接**的，待校验命令文本通过 `-EncodedCommand`（base64）或 stdin 传入，避免校验通道本身成为注入面；② 解析结果按命令字符串做缓存，同一条命令不重复起进程；③ 非 Windows 平台没有 PowerShell AST 可用，静默回退到现有黑名单——防御层降级但不消失。AST 遍历的思路和 calculator 的 `_safe_eval`（`tools/demo.py` 的 Python AST 白名单）完全同构，那是现成的参照物。
+- **验收标准**：扩展 `ai_agent/tests/test_core.py:330` 的 `TestTerminalSecurity`——现有黑名单用例必须全部保持绿色（这是回归底线），新增绕过用例断言 AST 版能拦截：`&('Remove'+'-Item') target -Recurse`、`$c='Remove-Item'; & $c target`、`iex ('Remove'+'-Item x')` 等字符串拼接/变量间接调用。注意解析型测试打 Windows-only 标记（如 `pytest.mark.skipif`），保证 CI 在非 Windows 上不炸。
+
+### 练习 2：human_confirm 结构化返回——approve / deny / modify / delegate
+
+- **背景**：`human_confirm`（`tools/system.py:198-214`）的返回值是一个自然语言字符串，用户实际只有两档选择：输入 y/yes 批准，输入其他任何内容取消。但真实场景里用户最常说的是第三句话："命令不对，改成这样再执行"——现在这句话只会被当成"取消"，LLM 收到 `[已取消]` 后要么放弃、要么瞎猜用户想要的修改。
+- **任务**：把返回值升级为结构化 JSON：`{"decision": "approve" | "deny" | "modify" | "delegate", "detail": "..."}`，其中 `modify` 携带用户改过的命令文本（`detail` 字段），`delegate` 表示"这事你自己看着办但责任你担"。CLI 侧接受 `y / n / m / d` 四种输入；`m` 时再提示一行让用户输入修改后的命令。
+- **提示**：好消息是 LLM 侧零改动也能工作——JSON 字符串作为 `role="tool"` 消息回灌后，模型自然读得懂 `{"decision": "modify", "detail": "Remove-Item _temp -Force"}` 并据此调整下一步动作。这个设计在项目里有先例：Critic 的评审结论就是 JSON 协议（`multi_agent.py` 的 `_parse_critic_decision` 三级解析正是为这类"模型读/写 JSON"场景的兜底）；`ToolExecution` dataclass（`tooling.py:44-51`）也证明"结构化结果"是项目的既有风格。Web 端的确认框（`web_ui.py` 的 human_confirm 分支）可以顺手加"修改后批准"输入框，但先做 CLI 版就够验收。
+- **验收标准**：`monkeypatch` 掉 `builtins.input`，分别模拟 `y / n / m（附修改文本）/ d` 四种输入，断言返回字符串是合法 JSON 且 `decision` / `detail` 字段正确；中断（EOFError/KeyboardInterrupt）路径断言返回 `deny` 而非抛异常。测试写法参照 `test_core.py` 的 `TestTerminalSecurity`。
+
+---
+
 ## 延伸阅读
 
 - [本项目设计决策清单 - S1~S5](../project/设计决策清单.md)

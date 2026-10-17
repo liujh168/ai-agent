@@ -440,6 +440,46 @@ Step 5 — 返回给用户
 3. **加 Skill trace**：在 Web UI 的 trace 里加 Skill 专属颜色标记（比如紫色），区分普通工具调用
 4. **加单元测试**：为 `SkillRegistry.match()` 写参数化测试，覆盖各种边界输入
 
+### 进阶练习：把"❌ 暂不"变成"动手实现"
+
+上面表格里标 ❌ 的四项，都是刻意留白的作业。每个练习给出了源码锚点和可检查的验收标准，按任意顺序做均可——它们彼此独立。
+
+#### 练习 1：Skill 嵌套——让 Skill 可以调用 Skill
+
+> 原文方向："在 `AgentRuntime` 的循环里，检测到 LLM 想调另一个 Skill（比如名字以 `skill_` 开头的工具），递归激活。"
+
+- **背景**：`SkillDef` 里有一个已解析但从未被消费的字段——`entry_mode: tool_call`（`ai_agent/skill.py:56`，校验在 `:217` 和 `:226-227`）。它是为嵌套预留的占位。而 Skill 路由目前只在循环开始前执行一次（`ai_agent/runtime.py:48-68`），循环内没有任何"再激活一个 Skill"的通道。
+- **任务**：把 `entry_mode: tool_call` 的 Skill 注册成名为 `skill_<name>` 的普通工具（schema + 闭包）并入 tool_map；LLM 在 Skill A 的多轮循环中调用 `skill_b` 时，闭包内部递归走一遍 `AgentRuntime.run()` 的 Skill 命中逻辑（换 prompt、过滤工具、限轮次）。必须加递归深度上限（建议 2 层），防止 A 调 B、B 调 A 的死循环。
+- **提示**：防递归直接参照 `run_multi_agent_tool` 闭包的做法（`app_core.py:627-635`——把 `run_multi_agent` 自身从 Executor 工具集里 `pop` 掉）：嵌套执行时从子循环的 `active_map` 里剔除所有 `skill_*` 工具，或传递深度计数。子 Skill 的工具过滤逻辑在 `runtime.py:63-67`，原样复用；`required_tools` 的存在性校验可参考 `skill.py:238-242`。
+- **验收标准**：仿照 `ai_agent/tests/test_skill.py` 用 `TemporaryDirectory` 造两个 Skill md（A 声明 `entry_mode: tool_call`），用 `test_executor_tools.py:26-40` 的 `_FakeMessage` / `_tool_call_response` 模式 mock client，断言：① 外层循环中 LLM 返回 `skill_b` 的 tool_call 时，内层 Skill 的 instructions 被应用且工具集被二次过滤；② 深度超过上限时闭包返回错误字符串而不是无限递归；③ `pytest ai_agent/tests/` 全部通过。
+
+#### 练习 2：Skill 执行状态持久化到数据库
+
+> 原文方向："Skill 实例内存态，对话结束即销毁；后续可存内部状态到数据库续上。"
+
+- **背景**：会话和消息已经持久化在 SQLite——`ChatStore`（`ai_agent/persistence.py:48`）维护 sessions / messages 两张表（建表在 `:72-97`），写入统一走 `_lock` 保护（`:175-188`）。但 Skill 的每次执行（命中了谁、跑了几轮、成功还是中途耗尽轮次）没有任何记录，重启即失忆。
+- **任务**：给 `ChatStore` 加一张 `skill_runs` 表（字段建议：skill_name / session_id / started_at / rounds_used / status / result_excerpt），Skill 命中时插入一条 `running` 记录，循环结束更新为 `done` 或 `exhausted`；提供查询接口，让重启后的 CLI/Web 能回答"上次那个 plan_and_write 跑到第几轮、产出是什么"。
+- **提示**：最天然的埋点是 `runtime.py:74-81` 的 `run_started` 事件——它的 payload 已经携带 `skill` 字段；循环结束位置（`runtime.py` 的 for 循环退出点）更新状态。建表 SQL 照抄 `persistence.py:72-97` 的 `CREATE TABLE IF NOT EXISTS` 风格；所有写操作复用 `self._lock` + `commit` 的既有模式，不要新开连接。
+- **验收标准**：用 `tempfile` 指向临时 db 文件实例化 `ChatStore`，完整走一遍"插入 running → 更新 done → 关闭 → 重新打开 → 读出记录"的生命周期断言；参照 `test_core.py` 的 `TestConfig` 风格写 3-4 个用例（写入、状态翻转、跨连接读取、未知 session 容错）；`pytest ai_agent/tests/` 全绿。
+
+#### 练习 3：LLM meta-routing——关键词预筛 Top-3 → LLM 选择
+
+> 原文方向："在 `chat_with_tools` 的路由层，把候选 Skill 的描述发给 LLM，让它从"候选 Skill + 普通工具"里选。准确率更高，但多一次 API 调用。"（`ai_agent/skill.py:276` 的注释也写着这个升级方向）
+
+- **背景**：`SkillRegistry.match()`（`skill.py:267-316`）是纯关键词打分，只返回最高分的一个候选，且 `score > 0.3` 的硬阈值会漏掉"语义相关但字面不含关键词"的请求（比如"帮我把这个任务拆开分步骤做"命中，"我不知道从哪开始下手"漏掉）。
+- **任务**：把 `match()` 拆成两段：第一阶段保留现有算法但返回得分 > 0 的 Top-3 候选列表；新增 `meta_match(user_input, client)`，把候选的 name + description 发给 LLM，要求只输出 JSON `{"skill": "<name>"}` 或 `{"skill": null}`，选中即激活，选 null 或解析失败回退为第一阶段最高分（保持现有行为兜底）。做成可选开关，默认关闭。
+- **提示**：LLM 输出 JSON 的鲁棒解析，直接复用多 Agent 里 `_parse_critic_decision` 的三级兜底思路（`ai_agent/multi_agent.py:104-150`：先 `json.loads` 整段 → 失败则提取 `{` 到 `}` 片段再试 → 仍失败回退默认值）。收窄人格的 system prompt 写法参考 `rag.py:219-244` 的 `answer()`。配置开关照 `config.py:69-81` 加字段、`:129-147` 的 `from_env` 读环境变量的既有模式。
+- **验收标准**：用 FakeClient（`test_executor_tools.py` 模式）断言：① 候选为 0 时不发起任何 LLM 调用；② LLM 返回合法 JSON 时激活对应 Skill；③ LLM 返回乱码/空时静默回退到关键词最高分；④ 开关关闭时行为与现状逐字节一致。`pytest ai_agent/tests/ -k skill` 通过。
+
+#### 练习 4：Skill 热加载——改完 md 不用重启
+
+> 原文方向："运行时加 md 文件需要重启；后续可加文件监听。"
+
+- **背景**：`_load_all()` 只在 `SkillRegistry.__init__` 里跑一次（`skill.py:167` 调用，实现在 `:172-184`），之后 `self.skills` 只读。教学演示中"改 Skill 文件 → 重启 → 再试"的循环很打断节奏。
+- **任务**：给 `SkillRegistry` 加 `reload()` 方法：重新扫描目录，按文件 mtime 判断哪些 md 新增/被改/被删，增量更新 `self.skills` 和 `self._errors`；再选一个触发点——CLI 加一条 `/reload_skills` 命令，或每轮对话前做一次轻量 mtime 检查（成本只是几次 `os.stat`）。
+- **提示**：mtime 对比照搬 RAG 缓存指纹的用法（`rag.py:246-257` 的 `st_mtime_ns`）；**不要引 watchdog 依赖**——教学项目用轮询足够，这与 RAG 篇"依赖少一项就少装一个包"（设计决策 R3）是同一个取舍。注意 `reload()` 要先清空 `_errors` 再重建，否则历史错误会越攒越多；同名 Skill 被修改后应整体替换 `SkillDef`，不要做字段级合并。
+- **验收标准**：`test_skill.py` 风格：tmpdir 写入一个 md → 构建 registry → 断言 `count == 1` → 改写 `trigger_keywords` 并 `os.utime` 刷新 mtime → `reload()` → 断言 `match()` 行为随之变化；再删除文件 → `reload()` → 断言 `count == 0` 且无异常。
+
 ---
 
 ## 八、向后兼容设计要点

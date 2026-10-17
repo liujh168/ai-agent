@@ -16,11 +16,12 @@
 | `chunk_size` | `RAG_CHUNK_SIZE` | `500` | int | RAG 分块字符数 |
 | `chunk_overlap` | `RAG_CHUNK_OVERLAP` | `50` | int | RAG 分块重叠字符数 |
 | `rag_cache_file` | `RAG_CACHE_FILE` | `_rag_cache.json` | str | RAG 缓存文件路径（相对 project_root） |
+| `rag_faiss_threshold` | `RAG_FAISS_THRESHOLD` | `2000` | int | FAISS 可选加速阈值：chunk 数超过该值且安装了 `faiss-cpu` 时启用 FAISS 索引检索 |
 | `project_root` | `PROJECT_ROOT` | 自动检测项目根 | str | 项目根目录（默认自动从文件位置推导） |
 | `workspace_root` | `AGENT_WORKSPACE_ROOT` | 同 project_root | str | 文件工具允许访问的根目录 |
 | `request_timeout` | `LM_STUDIO_TIMEOUT` | `120.0` | float | 模型请求超时秒数 |
 | `enable_dangerous_tools` | `ENABLE_DANGEROUS_TOOLS` | `false` | bool | 环境变量方式启用危险工具 |
-| `mcp_servers` | `MCP_SERVERS` | `()` | tuple[str,...] | MCP 服务器 URL 列表；环境变量中分号分隔 |
+| `mcp_servers` | `MCP_SERVERS` | `()` | tuple[str,...] | MCP 服务器列表（http(s) URL 或 `stdio:` 命令条目）；环境变量中分号分隔 |
 | `mcp_allowed_tools` | `MCP_ALLOWED_TOOLS` | `()` | tuple[str,...] | Web UI 允许的 MCP 工具；分号分隔 |
 | `skill_dir` | `SKILL_DIR` | `skills` | str | Skill Markdown 定义目录（为空或不存在则跳过） |
 | `rag_directories` | `RAG_DIRECTORIES` | `("docs/knowledge",)` | tuple[str,...] | RAG 知识扫描目录；分号分隔；递归扫描 .md/.txt/.pdf |
@@ -58,6 +59,7 @@ LM_STUDIO_TIMEOUT=120
 | `chunk_size` | `RAG_CHUNK_SIZE` | `500` |
 | `chunk_overlap` | `RAG_CHUNK_OVERLAP` | `50` |
 | `rag_cache_file` | `RAG_CACHE_FILE` | `_rag_cache.json` |
+| `rag_faiss_threshold` | `RAG_FAISS_THRESHOLD` | `2000` |
 | `rag_directories` | `RAG_DIRECTORIES` | `docs/knowledge` |
 
 **多目录示例**：
@@ -89,7 +91,7 @@ AGENT_WORKSPACE_ROOT=C:/Users/me/Documents/agent_workspace
 **启用 MCP**：
 
 ```bash
-MCP_SERVERS=https://mcp.example.com/tools;http://localhost:9000/sse
+MCP_SERVERS=https://mcp.example.com/tools;stdio:python -m my_mcp_server
 MCP_ALLOWED_TOOLS=mcp_0_query;mcp_0_list
 ```
 

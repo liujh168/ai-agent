@@ -15,8 +15,12 @@
 - **network 风险级** `ai_agent/tooling.py`：ToolPolicy 风险分类从四级扩为五级（read/write/execute/mcp/network），wp_publish / web_search / demo_vision 等外发工具归入 network；CLI 默认执行前人工确认，Web 公网分享模式整体禁用，eval 默认放行
 - **CI 工作流** `.github/workflows/ci.yml`：push/PR 触发，matrix Python 3.10–3.13（Windows runner，锁文件含 pywin32），步骤为 pip 安装 → ruff → pytest
 - **离线测试扩充至 101 条**：新增 Skill 解析/匹配、demos（ReAct 解析、structured_extract 重试）、wp_publish 全 mock 流程、MCP `_send` 错误分支与连接失败占位、eval HTML 报告模板渲染、路径穿越防护等测试文件
+- **RAG FAISS 可选加速** `ai_agent/rag.py`：`faiss-cpu` 作为可选依赖（`pyproject.toml` 新增 `faiss` extra），chunk 数超过 `faiss_threshold`（构造参数，默认 2000）且 faiss 可用时用 L2 归一化向量构建 `IndexFlatIP` 内积索引，检索自动切 FAISS；否则静默回退纯 Python 余弦扫描，两条路径返回结构一致；FAISS 索引由向量缓存确定性重建，不进 `_rag_cache.json`；新增离线测试 `ai_agent/tests/test_rag_faiss.py`（embedding 全 mock）
+- **Config.rag_faiss_threshold** `ai_agent/config.py`：FAISS 阈值接入配置（env `RAG_FAISS_THRESHOLD`，默认 2000），`validate()` 校验必须为正整数；`bootstrap.py` / `eval.py` 两处 `RAGKnowledgeBase` 实例化透传该值；eval 入口补 `cfg.validate()`，与 CLI/Web 一样启动即校验配置
+- **MCP STDIO Transport** `ai_agent/mcp_client.py`：新增 `MCPClientSTDIO`（子进程 + 换行分隔 JSON-RPC，initialize / tools/list / tools/call 与 HTTP 客户端同款接口，server 往 stdout 打的非 JSON 噪声行自动跳过，stderr 透传，`close()` / `__del__` 兜底终止子进程）；`MCPManager` 按 `stdio:` 前缀分派 Transport（如 `MCP_SERVERS=stdio:python -m my_mcp_server`），可接入 Desktop Commander / Filesystem 等本地 server，工具注册沿用 `mcp_` 前缀约定；新增 `ai_agent/tests/test_mcp_stdio.py`（内嵌假 server 子进程，离线 7 条）
 
 ### Changed（变更）
+- **多 Agent Executor 接入工具调用** `ai_agent/multi_agent.py` / `app_core.py` / `web_ui.py`：`run_multi_agent` 新增可选 `tools`/`tool_map`/`tool_executor` 参数，Executor 执行与修正子任务统一走 `_executor_chat`——传入工具集时委托 `chat_with_tools` 复用 `AgentRuntime` 的 FC 循环（零复制），工具调用过程经 `on_event` 转成 trace 行，工具结果随最终回复纳入子任务产出；不传时保持纯 `client.chat` 旧行为。两处装配点（FC 工具闭包、Web 模式菜单）均传入经 `clean_react_tool_map` 清洗并剔除 `run_multi_agent` 自身的工具集（防递归），Web 侧复用同一 `ToolExecutor` 安全策略；新增 `ai_agent/tests/test_executor_tools.py`（mock client + 真实 FC 循环，3 条）
 - **RAG 初始化改为目录扫描** `main.py` / `ai_agent/web_ui.py` / `ai_agent/eval.py`：从硬编码单文件路径改为遍历 `cfg.rag_directories` 下全部 `.md/.txt/.pdf` 文件，新增知识源放入 `docs/knowledge/` 即自动纳入索引
 - **根目录 README.md 更新**：补全新增模块（config.py / skill.py / mcp_client.py）、配置表格补 rag_directories、项目结构树更新为 docs 三层结构
 - **修复文件名尾部空格**：`docs/大语言模型能力说明 .md` → `docs/knowledge/大语言模型能力说明.md`

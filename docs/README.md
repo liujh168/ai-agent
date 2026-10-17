@@ -30,6 +30,7 @@ docs/
 项目开发过程中的总结、体会、踩坑笔记等。一篇文章一个 `.md` 文件，建议加 Hugo frontmatter（见下方模板）。
 
 - [blog/README.md](./blog/README.md) — 写作规范与 frontmatter 模板
+- 最新博文：[06-对照实验-上下文压缩与RAG检索](./blog/06-对照实验-上下文压缩与RAG检索.md) — 用可复现脚本（`experiments/`）给压缩与 FAISS 两条设计决策补上数据
 
 ---
 
