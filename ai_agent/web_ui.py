@@ -289,6 +289,12 @@ class AgentApp:
         def on_trace(line: str) -> None:
             event_queue.put(("trace", (line, "agent")))
 
+        # Executor 工具集：剔除内部演示工具与 run_multi_agent 自身（防递归）
+        executor_map = clean_react_tool_map(self.tool_map)
+        executor_map.pop("run_multi_agent", None)
+        executor_schemas = [
+            s for s in self._tool_schemas() if s["function"]["name"] in executor_map
+        ]
         reply = run_multi_agent(
             self.client,
             user_text,
@@ -296,6 +302,9 @@ class AgentApp:
             temperature=params["temperature"],
             max_tokens=params["max_tokens"],
             trace_callback=on_trace,
+            tools=executor_schemas,
+            tool_map=executor_map,
+            tool_executor=self.tool_executor,
         )
         event_queue.put(("done", reply))
 

@@ -21,12 +21,15 @@
   - 每个角色有独立 System Prompt，体现角色人格
   - 显式 show_messages() 展示角色间的消息传递轨迹
   - Critic 不通过时循环重试（最多 rounds 轮）
+  - Executor 可选接入工具：传入 tools/tool_map 后走 function calling 循环
+    （复用 AgentRuntime），工具结果自动纳入子任务产出
   - 与 chat_with_tools（单 Agent 自己选工具）形成对比
   - 与 chat_with_react（单 Agent 边想边做）形成对比
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 
@@ -70,13 +73,11 @@ ROLE_PROMPTS = {
         "评审原则：\n"
         "1. 标准：正确性、完整性、可执行性、有无遗漏关键步骤；\n"
         "2. 只在确实发现问题时才提出批评，不要为了批评而批评；\n"
-        "3. 批评要具体（指出哪个子任务/哪句话有什么问题），给出改进方向；\n"
-        "4. 如果整体合格，明确说「✅ 通过」并简述理由；\n"
-        "5. 如果不通过，明确说「❌ 不通过」并列出问题清单。\n\n"
-        "输出格式：\n"
-        "  ## 评审结论: ✅通过 或 ❌不通过\n"
-        "  ## 评审意见\n"
-        "  （具体内容）\n"
+        "3. 批评要具体（指出哪个子任务/哪句话有什么问题），给出改进方向。\n\n"
+        "输出格式：只输出一个 JSON 对象，不要输出任何其他文字或 Markdown 围栏：\n"
+        '  {"decision": "approve", "reason": "通过的理由"}\n'
+        '  {"decision": "reject", "reason": "不通过的具体问题清单"}\n'
+        "decision 只能是 approve（通过）或 reject（不通过）。"
     ),
 }
 
@@ -96,8 +97,46 @@ class RoleCall:
     timestamp: str = ""
 
 
+_APPROVE_WORDS = {"approve", "pass", "通过"}
+_REJECT_WORDS = {"reject", "fail", "不通过"}
+
+
 def _parse_critic_decision(text: str) -> bool:
-    """解析 Critic 的评审结论：True=通过，False=不通过"""
+    """解析 Critic 的评审结论：True=通过，False=不通过。
+
+    优先按约定的 JSON 协议解析（{"decision": "approve"/"reject", "reason": ...}，
+    decision 也接受中文「通过/不通过」）；JSON 解析失败时从文本中提取 JSON 片段再试；
+    仍失败则回退到旧的 emoji/关键词启发式，最终默认通过（避免卡死循环）。
+    """
+    decision = _try_parse_decision_json(text)
+    if decision is not None:
+        return decision
+    return _legacy_parse_decision(text)
+
+
+def _try_parse_decision_json(text: str) -> bool | None:
+    """尝试把 text（或其内部的 JSON 片段）解析为评审结论，失败返回 None。"""
+    candidates = [text.strip()]
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        word = str(data.get("decision", "")).strip().lower()
+        if word in _APPROVE_WORDS:
+            return True
+        if word in _REJECT_WORDS:
+            return False
+    return None
+
+
+def _legacy_parse_decision(text: str) -> bool:
+    """旧的 emoji/关键词解析，作为 JSON 解析失败时的兜底。"""
     # 先看明确的结论标记
     if "✅" in text or "通过" in text.split("\n")[0]:
         # 但要确认不是「不通过」
@@ -132,6 +171,9 @@ def run_multi_agent(
     temperature: float = 0.7,
     max_tokens: int = 2048,
     trace_callback=None,  # 可选：每行 print 文本会传给这个 callback
+    tools: list[dict] | None = None,  # 可选：Executor 可用的工具 schema（FC）
+    tool_map: dict | None = None,  # 可选：Executor 可用的工具映射
+    tool_executor=None,  # 可选：ToolExecutor（复用调用方的安全策略）
 ) -> str:
     """
     完整的 Planner → Executor → Critic 三角色协作流程。
@@ -141,6 +183,9 @@ def run_multi_agent(
         user_task: 用户的复杂任务
         max_rounds: Critic 不通过时最多重试几轮
         trace_callback: 可选 callable(line)，每行进度文本会被回调
+        tools / tool_map: 可选，同时传入后 Executor 走 function calling 循环
+            （复用 AgentRuntime），可调用工具完成子任务；不传则保持纯对话
+        tool_executor: 可选 ToolExecutor，传入后复用其安全策略执行工具
     返回:
         最终汇总的执行结果字符串
     """
@@ -152,6 +197,30 @@ def run_multi_agent(
             print(line, flush=True)
 
     separator = "\n" + "=" * 50 + "\n"
+
+    use_tools = bool(tools and tool_map)
+
+    def _executor_chat(msgs: list[dict], label: str) -> str:
+        if not use_tools:
+            return client.chat(msgs, temperature=temperature, max_tokens=max_tokens, label=label)
+
+        def on_event(event) -> None:
+            if event.kind == "tool_started":
+                _emit(f"   🔧 Executor 调用工具 {event.payload['name']}({event.payload['arguments']})")
+            elif event.kind == "tool_finished":
+                mark = "✅" if event.payload.get("ok") else "❌"
+                content = event.payload.get("content", "")
+                _emit(f"   {mark} 工具结果: {content[:200]}{'…' if len(content) > 200 else ''}")
+
+        return client.chat_with_tools(
+            msgs,
+            tools=tools,
+            tool_map=tool_map,
+            tool_executor=tool_executor,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            on_event=on_event,
+        )
 
     _emit(f"\n{separator}")
     _emit("🤝 多 Agent 协作启动（Planner + Executor + Critic）")
@@ -245,10 +314,8 @@ def run_multi_agent(
                 ),
             },
         ]
-        exec_output = client.chat(
+        exec_output = _executor_chat(
             executor_msgs,
-            temperature=temperature,
-            max_tokens=max_tokens,
             label=f"Executor 子任务 {i}/{len(subtasks)}",
         )
         _emit(f"\n📄 Executor 子任务 {i} 产出:\n{exec_output[:300]}{'…' if len(exec_output) > 300 else ''}")
@@ -292,10 +359,8 @@ def run_multi_agent(
                     ),
                 },
             ]
-            exec_output = client.chat(
+            exec_output = _executor_chat(
                 executor_msgs,
-                temperature=temperature,
-                max_tokens=max_tokens,
                 label=f"Executor 修正子任务 {i}",
             )
             _emit(f"   Executor 修正后产出: {exec_output[:200]}…")
