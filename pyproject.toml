@@ -27,6 +27,9 @@ dev = [
     "pytest>=8,<10",
     "ruff>=0.6,<1",
 ]
+faiss = [
+    "faiss-cpu>=1.8,<2",
+]
 
 [project.scripts]
 ai-agent = "main:main"

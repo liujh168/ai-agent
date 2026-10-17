@@ -12,6 +12,13 @@ from pathlib import Path
 import requests
 from pypdf import PdfReader
 
+try:
+    import faiss
+    import numpy as np
+except ImportError:
+    faiss = None
+    np = None
+
 log = logging.getLogger("Agent")
 
 
@@ -37,6 +44,7 @@ class RAGKnowledgeBase:
         chunk_overlap: int = 50,
         cache_file: str = "_rag_cache.json",
         request_timeout: float = 60.0,
+        faiss_threshold: int = 2000,
     ):
         self.base_url = base_url
         self.embed_model = embed_model
@@ -44,10 +52,12 @@ class RAGKnowledgeBase:
         self.chunk_overlap = chunk_overlap
         self.cache_file = cache_file
         self.request_timeout = request_timeout
+        self.faiss_threshold = faiss_threshold
         self.chunks: list[str] = []
         self.vectors: list[list[float]] = []
         self.sources: list[str] = []
         self.chunk_indices: list[int] = []
+        self._faiss_index = None
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
         resp = requests.post(
@@ -113,6 +123,7 @@ class RAGKnowledgeBase:
             self.vectors = cached["vectors"]
             self.sources = cached["sources"]
             self.chunk_indices = cached["chunk_indices"]
+            self._build_faiss_index()
             return len(self.chunks)
 
         self.chunks = []
@@ -138,6 +149,7 @@ class RAGKnowledgeBase:
                 f"embedding 返回数量不一致：chunks={len(self.chunks)}, vectors={len(self.vectors)}"
             )
         self._write_cache(key)
+        self._build_faiss_index()
         return len(self.chunks)
 
     def search(self, query: str, top_k: int = 5) -> list[tuple[str, float]]:
@@ -153,17 +165,55 @@ class RAGKnowledgeBase:
         if not query.strip() or not self.chunks or not self.vectors:
             return []
         query_vector = self._embed([query])[0]
+        if self._faiss_index is not None:
+            return self._search_faiss(query_vector, top_k, min_score)
         scored = [(self._cosine(query_vector, vector), i) for i, vector in enumerate(self.vectors)]
         scored.sort(reverse=True)
         return [
-            RetrievedChunk(
-                text=self.chunks[index],
-                score=score,
-                source=self.sources[index] if index < len(self.sources) else "",
-                chunk_index=self.chunk_indices[index] if index < len(self.chunk_indices) else index,
-            )
+            self._to_chunk(score, index)
             for score, index in scored[:top_k]
             if score >= min_score
+        ]
+
+    def _to_chunk(self, score: float, index: int) -> RetrievedChunk:
+        return RetrievedChunk(
+            text=self.chunks[index],
+            score=score,
+            source=self.sources[index] if index < len(self.sources) else "",
+            chunk_index=self.chunk_indices[index] if index < len(self.chunk_indices) else index,
+        )
+
+    def _build_faiss_index(self) -> None:
+        self._faiss_index = None
+        if faiss is None or len(self.vectors) <= self.faiss_threshold:
+            return
+        matrix = np.array(self.vectors, dtype="float32")
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        matrix = np.divide(matrix, norms, out=np.zeros_like(matrix), where=norms > 0)
+        index = faiss.IndexFlatIP(matrix.shape[1])
+        index.add(matrix)
+        self._faiss_index = index
+        log.info(
+            "RAG chunk 数 %d 超过阈值 %d，启用 FAISS IndexFlatIP 检索",
+            len(self.vectors),
+            self.faiss_threshold,
+        )
+
+    def _search_faiss(
+        self,
+        query_vector: list[float],
+        top_k: int,
+        min_score: float,
+    ) -> list[RetrievedChunk]:
+        query = np.array([query_vector], dtype="float32")
+        norm = np.linalg.norm(query)
+        if norm > 0:
+            query = query / norm
+        scores, indices = self._faiss_index.search(query, min(top_k, len(self.chunks)))
+        return [
+            self._to_chunk(float(score), int(index))
+            for score, index in zip(scores[0], indices[0])
+            if index >= 0 and score >= min_score
         ]
 
     def answer(
