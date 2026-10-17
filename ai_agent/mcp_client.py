@@ -1,22 +1,27 @@
 """
-ai_agent.mcp_client — 极简 MCP HTTP/Streamable HTTP 客户端
-==========================================================
-零外部新增依赖（只用项目已有的 requests）。
+ai_agent.mcp_client — 极简 MCP 客户端（Streamable HTTP + STDIO）
+================================================================
+零外部新增依赖（HTTP 用项目已有的 requests，STDIO 用标准库 subprocess）。
 
-支持 MCP Streamable HTTP Transport（官方推荐，POST JSON-RPC 请求）。
-不支持 STDIO / SSE（需要子进程或特殊流处理），后续可扩展。
+支持两种 Transport：
+- Streamable HTTP（官方推荐，POST JSON-RPC 请求）→ MCPClient
+- STDIO（本地子进程，stdin/stdout 换行分隔 JSON-RPC）→ MCPClientSTDIO
+不支持完整 SSE 流，后续可扩展。
 
 用法:
-    from ai_agent.mcp_client import MCPClient, MCPManager
+    from ai_agent.mcp_client import MCPClient, MCPClientSTDIO, MCPManager
 
-    # 单 server
+    # 单 server（HTTP）
     c = MCPClient("https://mcp.example.com/tools")
     c.initialize()
     tools = c.list_tools()         # → [MCPTool, ...]
     result = c.call_tool("calc", {"a": 1, "b": 2})  # → str
 
-    # 多 server 聚合
-    mgr = MCPManager(["https://mcp.example.com/tools", ...])
+    # 单 server（STDIO 本地子进程）
+    c = MCPClientSTDIO("python", ["-m", "my_mcp_server"])
+
+    # 多 server 聚合（条目带 stdio: 前缀走子进程，其余走 HTTP）
+    mgr = MCPManager(["https://mcp.example.com/tools", "stdio:python -m my_mcp_server"])
     mgr.connect_all()
     schemas = mgr.tool_schemas()          # → OpenAI function schemas
     tool_map = mgr.build_tool_callables() # → {name: callable}
@@ -26,8 +31,12 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
+import shlex
+import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -315,6 +324,223 @@ class MCPClient:
 
 
 # ============================================================
+# STDIO Transport：本地子进程客户端
+# ============================================================
+
+
+class MCPClientSTDIO:
+    """连接到一个本地 MCP Server（STDIO Transport：子进程 + 换行分隔 JSON-RPC）"""
+
+    def __init__(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        timeout: float = 15.0,
+        protocol_version: str = "2025-06-18",
+    ):
+        self.command = command
+        self.args = list(args or [])
+        self.url = " ".join([command, *self.args])  # 对齐 MCPClient.url，仅用于展示/日志
+        self.timeout = timeout
+        self.protocol_version = protocol_version
+
+        self._proc: subprocess.Popen | None = None
+        self._incoming: queue.Queue = queue.Queue()
+        self._request_id: int = 0
+        self._lock = threading.Lock()
+        self._connected: bool = False
+        self._server_info: dict = {}
+        self._tools: list[MCPTool] = []
+        self.server_index: int = -1  # 由 MCPManager.connect_all 分配
+
+    @property
+    def tools(self) -> list[MCPTool]:
+        """最近一次 list_tools() 拉到的工具列表"""
+        return list(self._tools)
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    # ---------- 子进程与底层 JSON-RPC ----------
+
+    def _ensure_proc(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        try:
+            self._proc = subprocess.Popen(
+                [self.command, *self.args],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                # stderr 透传到父进程，server 的日志直接可见
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+        except OSError as e:
+            raise MCPError(code=-1, message=f"启动 MCP server 子进程失败: {e}") from e
+        threading.Thread(
+            target=self._read_loop, args=(self._proc, self._incoming), daemon=True
+        ).start()
+
+    @staticmethod
+    def _read_loop(proc: subprocess.Popen, incoming: queue.Queue) -> None:
+        """逐行读 stdout：非 JSON 行跳过，JSON-RPC 消息进队列"""
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                incoming.put(json.loads(line))
+            except json.JSONDecodeError:
+                log.debug("MCP stdio 跳过非 JSON 行: %s", line[:200])
+
+    def _write(self, payload: dict) -> None:
+        proc = self._proc
+        if proc is None or proc.stdin is None or proc.poll() is not None:
+            raise MCPError(code=-1, message="MCP server 子进程不可用")
+        try:
+            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.flush()
+        except OSError as e:
+            raise MCPError(code=-1, message=f"写入 MCP server stdin 失败: {e}") from e
+
+    def _send(self, method: str, params: dict | None = None) -> Any:
+        """写入一行 JSON-RPC 请求，阻塞等待同 id 的响应，超时抛 MCPError"""
+        self._ensure_proc()
+        with self._lock:
+            self._request_id += 1
+            req_id = self._request_id
+            self._write(
+                {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}}
+            )
+            deadline = time.monotonic() + self.timeout
+            while True:
+                try:
+                    msg = self._incoming.get(timeout=max(deadline - time.monotonic(), 0.0))
+                except queue.Empty:
+                    raise MCPError(code=-1, message=f"STDIO 等待响应超时（{method}）") from None
+                if not isinstance(msg, dict) or msg.get("id") != req_id:
+                    continue  # server 通知或无关消息，跳过
+                if "error" in msg:
+                    err = msg["error"]
+                    raise MCPError(
+                        code=err.get("code", -1),
+                        message=err.get("message", "未知错误"),
+                        data=err.get("data"),
+                    )
+                return msg.get("result")
+
+    def _notify(self, method: str, params: dict | None = None) -> None:
+        """Send a JSON-RPC notification without an id."""
+        self._ensure_proc()
+        self._write({"jsonrpc": "2.0", "method": method, "params": params or {}})
+
+    # ---------- 高层 API（与 MCPClient 同款接口） ----------
+
+    def initialize(self) -> dict:
+        """MCP 初始化握手"""
+        result = self._send(
+            "initialize",
+            {
+                "protocolVersion": self.protocol_version,
+                "capabilities": {},
+                "clientInfo": {"name": "ai-agent", "version": "1.0"},
+            },
+        )
+        self._connected = True
+        self._server_info = result or {}
+        negotiated = self._server_info.get("protocolVersion")
+        if negotiated:
+            self.protocol_version = str(negotiated)
+
+        self._notify("notifications/initialized", {})
+
+        return self._server_info
+
+    def list_tools(self) -> list[MCPTool]:
+        """列出 server 上可用的工具"""
+        if not self._connected:
+            self.initialize()
+
+        result = self._send("tools/list", {})
+        raw_tools = (result or {}).get("tools", [])
+
+        tools: list[MCPTool] = []
+        for t in raw_tools:
+            tools.append(
+                MCPTool(
+                    name=t["name"],
+                    description=t.get("description", ""),
+                    input_schema=t.get("inputSchema", {"type": "object", "properties": {}}),
+                    server_url=self.url,
+                )
+            )
+        self._tools = tools
+        return tools
+
+    def call_tool(self, name: str, arguments: dict | None = None) -> str:
+        """调用一个 MCP 工具，返回字符串结果"""
+        if not self._connected:
+            self.initialize()
+
+        result = self._send(
+            "tools/call",
+            {
+                "name": name,
+                "arguments": arguments or {},
+            },
+        )
+        is_error = bool((result or {}).get("isError"))
+
+        contents = (result or {}).get("content", [])
+        parts = []
+        for c in contents:
+            if isinstance(c, dict) and c.get("type") == "text":
+                parts.append(c.get("text", ""))
+            elif isinstance(c, dict):
+                parts.append(f"[{c.get('type', 'unknown')}: {str(c)[:200]}]")
+
+        content = "\n".join(parts) if parts else "(无输出)"
+        return f"[MCP 工具错误] {content}" if is_error else content
+
+    def ping(self) -> bool:
+        """健康检查"""
+        try:
+            self._send("ping", {})
+            return True
+        except MCPError as exc:
+            log.debug("MCP ping 失败（%s）: %s", self.url, exc)
+            return False
+
+    def close(self) -> None:
+        """终止子进程（best-effort，入口退出时调用）"""
+        self._connected = False
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except OSError:
+            pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+# ============================================================
 # 多 Server 管理器
 # ============================================================
 
@@ -333,7 +559,7 @@ class MCPManager:
         """连接所有 server 并 list_tools（同步阻塞）"""
         for idx, url in enumerate(self.server_urls):
             try:
-                client = MCPClient(url)
+                client = _create_client(url)
                 client.initialize()
                 tools = client.list_tools()
                 client.server_index = idx
@@ -432,6 +658,19 @@ class MCPManager:
 # ============================================================
 # 工厂函数（可选依赖保护）
 # ============================================================
+
+
+_STDIO_PREFIX = "stdio:"
+
+
+def _create_client(spec: str) -> MCPClient | MCPClientSTDIO:
+    """按条目前缀选择 Transport：`stdio:<command> [args...]` → 本地子进程，其余 → HTTP"""
+    if spec.startswith(_STDIO_PREFIX):
+        parts = shlex.split(spec[len(_STDIO_PREFIX):].strip())
+        if not parts:
+            raise ValueError(f"stdio MCP server 条目缺少命令: {spec!r}")
+        return MCPClientSTDIO(parts[0], parts[1:])
+    return MCPClient(spec)
 
 
 def create_mcp_manager(server_urls: list[str]) -> MCPManager | None:
