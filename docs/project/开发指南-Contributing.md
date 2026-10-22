@@ -1,6 +1,6 @@
 # 开发指南 — Contributing
 
-> 如何扩展这个 Agent 项目：新增工具、写 Skill、加评测用例、运行测试。
+> 如何扩展这个 Agent 项目：新增工具、写 Skill、加评测用例、改交互课件中心、运行测试。
 
 ---
 
@@ -8,6 +8,7 @@
 
 - [环境准备](#环境准备)
 - [代码规范](#代码规范)
+- [修改交互课件中心](#修改交互课件中心)
 - [新增一个工具](#新增一个工具)
 - [写一个 Skill](#写一个-skill)
 - [新增一条评测用例](#新增一条评测用例)
@@ -95,6 +96,26 @@ Function Calling 层会读取 `func.__name__`。如果 wrapper 不 `@wraps`，LL
 ruff check main.py ai_agent --ignore E501
 # 关注 F 错误（F401 未使用 import / F841 未使用变量）
 ```
+
+---
+
+## 修改交互课件中心
+
+「🎓 交互课件中心」是 `web_courses/` 下的 Vue 3 单页应用（Vite + TypeScript，hash 路由），
+构建产物同步到 `ai_agent/static/courses/` 后由 `web_ui.py` 挂载到 `/courses/`。
+
+```powershell
+cd web_courses
+npm install
+npm run dev                  # 本地开发预览 http://localhost:5173
+.\deploy-to-static.ps1       # 构建并同步到 ai_agent/static/courses/（Linux/macOS 用 deploy-to-static.sh）
+```
+
+同步后重启 Web UI（`python -m ai_agent.web_ui`）生效。注意：
+
+- `src/real/` 是项目真实源码的**快照**（打包进「对照真实源码」折叠区），改动 `runtime.py` /
+  `tooling.py` / `rag.py` 等对应模块后需重新拷贝快照再构建，否则对照区与真实代码漂移。
+- 课件里的 JSON-RPC 报文、向量示例若与实现口径不一致，以 `ai_agent/` 源码为准。
 
 ---
 

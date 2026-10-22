@@ -45,3 +45,6 @@ eval_report*.html
 .workbuddy/
 !ai_agent/eval_report_template.html
 greet.txt
+
+# 课件中心前端（web_courses/）
+node_modules/

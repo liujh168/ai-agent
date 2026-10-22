@@ -102,6 +102,8 @@ python -m ai_agent.web_ui    # 或 ai-agent-web
 | 压缩 × RAG 实验 | 可拖动的压缩触发 + 向量检索模拟器 | `docs/blog/06` | `rag.py` / `app_core.py` |
 | Skill 路由 / ReAct 对比 | 同一道题 FC vs ReAct 双栏同步回放 | `docs/blog/03` | `skill.py` / `demos/react.py` |
 
+课件前端源码在 `web_courses/`（Vue 3），修改后运行 `web_courses/deploy-to-static.ps1`（或 `.sh`）重新构建同步，详见 [开发指南](docs/project/开发指南-Contributing.md)。
+
 3. **看源码**：课件「真实代码」页签的折叠区有「课件步骤 → 真实函数」对照表 + 项目源码原文。
 4. **跑 demo**：`ai_agent/demos/` 下每个机制都有零依赖可运行脚本（`python fc_safety_demo.py` 等，不依赖 LM Studio），跑一遍加深印象。
 
