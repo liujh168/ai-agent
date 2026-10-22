@@ -2,6 +2,8 @@
 
 > 作者：Agent Dev 实践笔记 | 发布日期：2026-10-17 | 标签：Agent, 对照实验, 上下文压缩, RAG, FAISS, Benchmark
 
+> 🎓 **配套交互课件**：Web UI 的「🎓 交互课件中心」页签 → 《压缩 × RAG 实验》（`http://127.0.0.1:7860/courses/#/rag`）——可拖动的压缩触发模拟器 + 向量检索打分器，「真实代码」页签可对照 `rag.py` 的 `_cosine()` / `search_detailed()`（含 FAISS 分支）与压缩持久化实现。
+
 ---
 
 ## 引子

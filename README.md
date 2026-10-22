@@ -75,6 +75,8 @@ python -m ai_agent.web_ui    # 或 ai-agent-web
 
 进入对话后试试：`北京天气怎么样？123*456 等于多少？` 观察模型如何调用工具。
 
+> **CLI 与 Web UI 的分工**：CLI（`python main.py`）是最薄的验证面——改完代码想确认 Agent 还能跑，不用开浏览器；也适合脚本化、管道输入等自动化场景。Web UI（`python -m ai_agent.web_ui`）适合可视化学习：API 调用检查器、执行轨迹、🎓 交互课件中心都只在 Web 侧提供。两者共享 `app_core` / `bootstrap` 同一套装配（见 docs/blog/02），行为一致，按场景任选。
+
 ## 可选能力
 
 - `python -m pip install -e .[faiss]`：RAG 片段超过阈值时启用 FAISS 向量索引加速（未装则自动回退纯 Python 余弦检索）。
@@ -83,8 +85,25 @@ python -m ai_agent.web_ui    # 或 ai-agent-web
 ## 文档导航
 
 - [docs/README.md](docs/README.md)：文档总索引，说明三层目录的组织方式。
-- [docs/blog/](docs/blog/)：5 篇教学博文系列，从 Function Calling 极简实现一路讲到安全防御与评测框架，适合按顺序阅读。
+- [docs/blog/](docs/blog/)：6 篇教学博文系列，从 Function Calling 极简实现一路讲到安全防御、评测框架与对照实验，适合按顺序阅读。
 - [docs/project/](docs/project/)：原理拆解与技术文档——架构总览、Quickstart 十分钟跑通、34 条设计决策清单、RAG/Skill/MCP/多 Agent 专题、API 与配置参考、FAQ。
+
+## 学习路径指引
+
+推荐按「**文档建概念 → 课件动手回放 → 源码逐行对照 → demo 本地验证**」的闭环学习：
+
+1. **读文档**：`docs/blog/` 建立直觉，`docs/project/` 深入机制（每篇相关文档顶部都有 🎓 课件指引）。
+2. **动手回放**：启动 Web UI（`python -m ai_agent.web_ui`），打开「🎓 交互课件中心」页签——四门交互课程可逐步播放真实报文、调参模拟器，FC 课程的「安全门」还支持确认/拒绝分支决策。
+
+| 课程 | 讲什么 | 对照文档 | 对照源码 |
+|---|---|---|---|
+| MCP 交互演示 | initialize 握手 → tools/list → tools/call 全会话 | `docs/project/MCP客户端协议拆解.md` | `ai_agent/mcp_client.py` |
+| FC 循环与安全门 | FC 循环 + 风险分类人工确认（含分支） | `docs/blog/01`、`docs/blog/04` | `runtime.py` / `tooling.py` |
+| 压缩 × RAG 实验 | 可拖动的压缩触发 + 向量检索模拟器 | `docs/blog/06` | `rag.py` / `app_core.py` |
+| Skill 路由 / ReAct 对比 | 同一道题 FC vs ReAct 双栏同步回放 | `docs/blog/03` | `skill.py` / `demos/react.py` |
+
+3. **看源码**：课件「真实代码」页签的折叠区有「课件步骤 → 真实函数」对照表 + 项目源码原文。
+4. **跑 demo**：`ai_agent/demos/` 下每个机制都有零依赖可运行脚本（`python fc_safety_demo.py` 等，不依赖 LM Studio），跑一遍加深印象。
 
 ## 运行测试
 

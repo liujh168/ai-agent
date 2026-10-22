@@ -2,6 +2,8 @@
 
 > 作者：Agent Dev 实践笔记 | 发布日期：2026-09-21 | 标签：Agent, 安全, AST, Human-in-the-loop, Tool Policy
 
+> 🎓 **配套交互课件**：Web UI 的「🎓 交互课件中心」页签 → 《Function Calling 循环与安全门》（`http://127.0.0.1:7860/courses/#/fc`）——安全门决策点支持"确认 / 拒绝 / 查看风险表"三分支回放，「真实代码」页签可对照 `tooling.py` 的 `ToolPolicy.classify()` 与 `ToolExecutor.execute()`。
+
 ---
 
 ## 引子

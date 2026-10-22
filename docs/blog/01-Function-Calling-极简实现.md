@@ -2,6 +2,8 @@
 
 > 作者：Agent Dev 实践笔记 | 发布日期：2026-09-21 | 标签：Agent, Function Calling, Python, LM Studio
 
+> 🎓 **配套交互课件**：Web UI 的「🎓 交互课件中心」页签 → 《Function Calling 循环与安全门》（`http://127.0.0.1:7860/courses/#/fc`）——可交互回放 FC 循环全流程（含安全门人工确认分支），「真实代码」页签可对照本文引用的 `runtime.py` 源码。
+
 ---
 
 ## 引子

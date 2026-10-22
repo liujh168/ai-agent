@@ -22,6 +22,7 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fastapi.staticfiles import StaticFiles
 from ai_agent import web_render
 from ai_agent.app_core import (
     TOOL_COUNT,
@@ -613,120 +614,134 @@ def build_ui(app: AgentApp) -> gr.Blocks:
         # 会话列表变更信号：任何增删会话的事件都输出最新列表来触发 @gr.render 重绘
         sessions_data = gr.State(app.list_sessions())
 
-        with gr.Row():
-            with gr.Column(scale=1, min_width=270):
-                gr.Markdown("### ⚙️ 模式选择")
-                mode_radio = gr.Radio(
-                    choices=[
-                        ("普通对话 (Function Calling)", "chat"),
-                        ("ReAct 边想边做", "react"),
-                        ("多 Agent 协作", "multi_agent"),
-                    ],
-                    value="chat",
-                    label="Agent 模式",
-                )
+        with gr.Tabs():
+            with gr.Tab("💬 对话"):
+                with gr.Row():
+                    with gr.Column(scale=1, min_width=270):
+                        gr.Markdown("### ⚙️ 模式选择")
+                        mode_radio = gr.Radio(
+                            choices=[
+                                ("普通对话 (Function Calling)", "chat"),
+                                ("ReAct 边想边做", "react"),
+                                ("多 Agent 协作", "multi_agent"),
+                            ],
+                            value="chat",
+                            label="Agent 模式",
+                        )
 
-                with gr.Accordion("🎛️ 采样参数", open=False):
-                    temp_slider = gr.Slider(
-                        minimum=0.0,
-                        maximum=1.5,
-                        step=0.05,
-                        value=DEFAULT_RUN_PARAMS["temperature"],
-                        label="temperature（越高越随机）",
-                    )
-                    tokens_slider = gr.Slider(
-                        minimum=256,
-                        maximum=8192,
-                        step=256,
-                        value=DEFAULT_RUN_PARAMS["max_tokens"],
-                        label="max_tokens（单轮输出上限）",
-                    )
-                    iter_slider = gr.Slider(
-                        minimum=1,
-                        maximum=10,
-                        step=1,
-                        value=DEFAULT_RUN_PARAMS["max_iterations"],
-                        label="max_iterations（工具循环上限）",
-                    )
-                    btn_apply_params = gr.Button("应用参数")
+                        with gr.Accordion("🎛️ 采样参数", open=False):
+                            temp_slider = gr.Slider(
+                                minimum=0.0,
+                                maximum=1.5,
+                                step=0.05,
+                                value=DEFAULT_RUN_PARAMS["temperature"],
+                                label="temperature（越高越随机）",
+                            )
+                            tokens_slider = gr.Slider(
+                                minimum=256,
+                                maximum=8192,
+                                step=256,
+                                value=DEFAULT_RUN_PARAMS["max_tokens"],
+                                label="max_tokens（单轮输出上限）",
+                            )
+                            iter_slider = gr.Slider(
+                                minimum=1,
+                                maximum=10,
+                                step=1,
+                                value=DEFAULT_RUN_PARAMS["max_iterations"],
+                                label="max_iterations（工具循环上限）",
+                            )
+                            btn_apply_params = gr.Button("应用参数")
 
-                with gr.Accordion("🧩 系统提示词（system message）", open=False):
-                    prompt_box = gr.Textbox(
-                        value=default_prompt,
-                        lines=10,
-                        max_lines=18,
-                        show_label=False,
-                        placeholder="system 消息内容",
-                    )
-                    with gr.Row():
-                        btn_apply_prompt = gr.Button("应用", variant="primary")
-                        btn_reset_prompt = gr.Button("恢复默认")
-                    gr.Markdown(
-                        "<span class='inspector-hint'>system 消息是每次 API 调用的第一条输入，"
-                        "改它就能立刻在右侧看到效果。</span>"
-                    )
+                        with gr.Accordion("🧩 系统提示词（system message）", open=False):
+                            prompt_box = gr.Textbox(
+                                value=default_prompt,
+                                lines=10,
+                                max_lines=18,
+                                show_label=False,
+                                placeholder="system 消息内容",
+                            )
+                            with gr.Row():
+                                btn_apply_prompt = gr.Button("应用", variant="primary")
+                                btn_reset_prompt = gr.Button("恢复默认")
+                            gr.Markdown(
+                                "<span class='inspector-hint'>system 消息是每次 API 调用的第一条输入，"
+                                "改它就能立刻在右侧看到效果。</span>"
+                            )
 
-                with gr.Accordion("📁 会话管理", open=False):
-                    session_list_container = gr.Group()
-                    with gr.Row():
-                        btn_new_session = gr.Button("✨ 新会话", variant="primary")
-                        btn_refresh_sessions = gr.Button("🔄 刷新列表")
-                    btn_delete_all_sessions = gr.Button("🗑 删除全部历史会话", variant="stop")
-                    with gr.Column(visible=False) as delete_all_confirm_box:
-                        gr.Markdown("⚠️ 确认删除全部历史会话？此操作不可恢复。")
+                        with gr.Accordion("📁 会话管理", open=False):
+                            session_list_container = gr.Group()
+                            with gr.Row():
+                                btn_new_session = gr.Button("✨ 新会话", variant="primary")
+                                btn_refresh_sessions = gr.Button("🔄 刷新列表")
+                            btn_delete_all_sessions = gr.Button("🗑 删除全部历史会话", variant="stop")
+                            with gr.Column(visible=False) as delete_all_confirm_box:
+                                gr.Markdown("⚠️ 确认删除全部历史会话？此操作不可恢复。")
+                                with gr.Row():
+                                    btn_confirm_delete_all = gr.Button("确认删除", variant="stop", size="sm")
+                                    btn_cancel_delete_all = gr.Button("取消", size="sm")
+
+                        gr.Markdown("### 📝 快捷示例")
                         with gr.Row():
-                            btn_confirm_delete_all = gr.Button("确认删除", variant="stop", size="sm")
-                            btn_cancel_delete_all = gr.Button("取消", size="sm")
+                            btn_example1 = gr.Button("天气+计算")
+                            btn_example2 = gr.Button("ReAct 推荐")
+                        with gr.Row():
+                            btn_example3 = gr.Button("多 Agent 写文")
+                            btn_example4 = gr.Button("SQL 查询")
 
-                gr.Markdown("### 📝 快捷示例")
-                with gr.Row():
-                    btn_example1 = gr.Button("天气+计算")
-                    btn_example2 = gr.Button("ReAct 推荐")
-                with gr.Row():
-                    btn_example3 = gr.Button("多 Agent 写文")
-                    btn_example4 = gr.Button("SQL 查询")
-
-                gr.Markdown(
-                    "### 安全边界\n"
-                    "- 文件操作限制在项目工作区\n"
-                    "- SQL 始终以只读连接执行\n"
-                    "- Web 不开放代码和终端执行\n"
-                    "- 公网分享关闭写入、MCP 和外发网络工具"
-                )
-
-            with gr.Column(scale=3, min_width=340):
-                chatbot = gr.Chatbot(height=520, type="messages")
-                with gr.Row():
-                    msg_input = gr.Textbox(
-                        label="输入",
-                        placeholder="在这里输入你的问题...",
-                        lines=2,
-                        scale=4,
-                    )
-                    with gr.Column(scale=1):
-                        btn_send = gr.Button("发送", variant="primary")
-                        btn_clear = gr.Button("清空对话")
-
-            with gr.Column(scale=3, min_width=420):
-                with gr.Tabs():
-                    with gr.Tab("🔍 API 调用检查器"):
-                        llm_output = gr.HTML(value=app.llm_panel_html(app.new_state()))
-                        btn_clear_calls = gr.Button("🗑 清空调用记录", size="sm")
                         gr.Markdown(
-                            "<span class='inspector-hint'>"
-                            "卡片按「第几轮提问」分组列出本会话的所有 API 调用——历史轮折叠在下方，"
-                            "最新一轮展开并支持流式实时查看。展开任意一条可以看到："
-                            "**① 输入**（模型真正收到的每一条消息）与 **② 输出**"
-                            "（content / tool_calls / finish_reason / token 用量）左右对照，"
-                            "下方还有等价的请求 JSON、响应 JSON 和可复制运行的 Python 代码，"
-                            "鼠标悬停代码块可一键复制。≈ 表示 token 数为字符估算。"
-                            "</span>"
+                            "### 安全边界\n"
+                            "- 文件操作限制在项目工作区\n"
+                            "- SQL 始终以只读连接执行\n"
+                            "- Web 不开放代码和终端执行\n"
+                            "- 公网分享关闭写入、MCP 和外发网络工具"
                         )
-                    with gr.Tab("🧭 执行轨迹"):
-                        trace_output = gr.HTML(
-                            value='<div class="trace-box" style="color:#666">等待请求...</div>',
-                            label="执行轨迹",
-                        )
+
+                    with gr.Column(scale=3, min_width=340):
+                        chatbot = gr.Chatbot(height=520, type="messages")
+                        with gr.Row():
+                            msg_input = gr.Textbox(
+                                label="输入",
+                                placeholder="在这里输入你的问题...",
+                                lines=2,
+                                scale=4,
+                            )
+                            with gr.Column(scale=1):
+                                btn_send = gr.Button("发送", variant="primary")
+                                btn_clear = gr.Button("清空对话")
+
+                    with gr.Column(scale=3, min_width=420):
+                        with gr.Tabs():
+                            with gr.Tab("🔍 API 调用检查器"):
+                                llm_output = gr.HTML(value=app.llm_panel_html(app.new_state()))
+                                btn_clear_calls = gr.Button("🗑 清空调用记录", size="sm")
+                                gr.Markdown(
+                                    "<span class='inspector-hint'>"
+                                    "卡片按「第几轮提问」分组列出本会话的所有 API 调用——历史轮折叠在下方，"
+                                    "最新一轮展开并支持流式实时查看。展开任意一条可以看到："
+                                    "**① 输入**（模型真正收到的每一条消息）与 **② 输出**"
+                                    "（content / tool_calls / finish_reason / token 用量）左右对照，"
+                                    "下方还有等价的请求 JSON、响应 JSON 和可复制运行的 Python 代码，"
+                                    "鼠标悬停代码块可一键复制。≈ 表示 token 数为字符估算。"
+                                    "</span>"
+                                )
+                            with gr.Tab("🧭 执行轨迹"):
+                                trace_output = gr.HTML(
+                                    value='<div class="trace-box" style="color:#666">等待请求...</div>',
+                                    label="执行轨迹",
+                                )
+            with gr.Tab("🎓 交互课件中心"):
+                gr.HTML(
+                    '<iframe src="/courses/" style="width:100%;height:860px;border:none;border-radius:10px;background:#020617" '
+                    'title="AI Agent 交互课件中心"></iframe>'
+                )
+                gr.Markdown(
+                    "<span class='inspector-hint'>嵌入式交互课件（Vue3 单页应用，左侧切换课程）："
+                    "① MCP 客户端↔服务端完整会话报文 ② Function Calling 循环与安全门（含人工确认决策分支）"
+                    "③ 上下文压缩×RAG 检索可动手模拟器 ④ Skill 路由与 ReAct/FC 模式对照。"
+                    "每门课附零依赖可运行的 Python demo（ai_agent/demos/）。对照阅读："
+                    "docs/blog/ 与 docs/project/ 下的同名拆解文章。</span>"
+                )
 
         def on_mode_change(mode_value, state):
             return app.set_mode(mode_value, state)
@@ -974,13 +989,25 @@ def main() -> None:
     print()
 
     demo = build_ui(app)
+    courses_dir = os.path.join(_STATIC_DIR, "courses")
     try:
         demo.launch(
             server_name=args.host,
             server_port=args.port,
             share=args.share,
             inbrowser=False,
+            prevent_thread_lock=True,
         )
+        if os.path.isdir(courses_dir):
+            # 注意：launch() 内部会重建 FastAPI app，必须在 launch 之后挂载，
+            # 否则路由会随旧 app 一起被丢弃；Starlette 路由表运行时动态匹配，挂载后立即生效。
+            demo.app.mount(
+                "/courses",
+                StaticFiles(directory=courses_dir, html=True),
+                name="courses",
+            )
+            print(f"   课件中心: http://{args.host}:{args.port}/courses/")
+        demo.block_thread()
     finally:
         if app.mcp_manager is not None:
             app.mcp_manager.close_all()

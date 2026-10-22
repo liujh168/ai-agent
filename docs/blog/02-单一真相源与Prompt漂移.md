@@ -2,6 +2,8 @@
 
 > 作者：Agent Dev 实践笔记 | 发布日期：2026-09-21 | 标签：Agent, 架构设计, Prompt Engineering, 软件工程
 
+> 🎓 **相关交互课件**：Web UI 的「🎓 交互课件中心」页签（`http://127.0.0.1:7860/courses/`）——《FC 循环与安全门》可见 system prompt 与工具 schema 如何进入每次请求，《Skill 路由 / ReAct 对比》可见提示词注入对模型行为的直接影响。本文聚焦的"单一真相源"工程约束，对应源码 `ai_agent/app_core.py` 的 `build_system_prompt()` / `TOOL_SCHEMAS`。
+
 ---
 
 ## 引子

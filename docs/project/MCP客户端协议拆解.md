@@ -3,6 +3,8 @@
 > 以本项目（AI Agent 交互式演示，基于 LM Studio 本地大模型）为实例，拆解 MCP（Model Context Protocol）客户端的实现：它如何用 682 行代码（HTTP 走 `requests`，STDIO 走标准库 `subprocess`）把远端/本地 MCP 工具接入本地 Function Calling 循环。
 > 所有代码引用均可按 `文件:行号` 定位核实。设计权衡部分与《设计决策清单》P1–P3 互补：那边讲"为什么这样设计"，这篇讲"机制怎么运转"。
 
+> 🎓 **配套交互课件**：Web UI 的「🎓 交互课件中心」页签 → 《MCP 交互演示》（`http://127.0.0.1:7860/courses/#/mcp`）——initialize 握手到 shutdown 的 11 步完整报文回放（含 isError 与通知机制），「真实代码」页签可对照本文的 `mcp_client.py` 源码。
+
 ---
 
 ## 一、先搞清楚：MCP 到底是什么

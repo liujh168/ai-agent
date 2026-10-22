@@ -2,6 +2,8 @@
 
 > 作者：Agent Dev 实践笔记 | 发布日期：2026-09-21 | 标签：Agent, Skill, Markdown, 低代码, Routing
 
+> 🎓 **配套交互课件**：Web UI 的「🎓 交互课件中心」页签 → 《Skill 路由 / ReAct 对比》（`http://127.0.0.1:7860/courses/#/react`）——同一道题的 FC / ReAct 双栏同步回放，「真实代码」页签可对照 `skill.py` 的 `SkillRegistry.match()` 源码。
+
 ---
 
 ## 引子
