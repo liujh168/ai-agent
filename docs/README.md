@@ -18,6 +18,7 @@ docs/
 项目专属，随代码迭代同步更新。包含设计决策、架构拆解、技术路线图等。新增项目文档请放到这里。
 
 - [project/README.md](./project/README.md) — 本目录的文档清单与维护指南
+- [GitHub-Pages-部署与域名配置](./project/GitHub-Pages-部署与域名配置.md) — 仓库、Pages 站点与自定义域名的完整配置及故障排查
 
 ### `knowledge/` — 外部学习资料
 
