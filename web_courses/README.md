@@ -29,3 +29,12 @@ npm run dev        # 本地开发，默认 http://localhost:5173
 - `src/demos/`：零依赖 Python 教学脚本（同步发布到 `ai_agent/demos/`）
 - `src/real/`：项目真实源码快照（经 Vite `?raw` 打包进「对照真实源码」折叠区；
   **项目源码大幅演进后需重新拷贝对应文件再构建**，否则对照区会与真实代码漂移）
+
+## 在线访问
+
+课件中心通过 GitHub Actions 自动构建并发布到 GitHub Pages：
+
+- https://liujh168.github.io/ai-agent/
+- https://code.liujh168.com/ai-agent/
+
+`web_courses/` 下有变更并推送到 `master` 时自动重新部署。
