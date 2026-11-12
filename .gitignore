@@ -43,6 +43,8 @@ poem.txt
 *.db
 eval_report*.html
 .workbuddy/
+wb-req*.json
+liujh168.github.io/
 !ai_agent/eval_report_template.html
 greet.txt
 
